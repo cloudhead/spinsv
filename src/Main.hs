@@ -1,4 +1,8 @@
 module Main where
+--
+-- TODO check 'async' module
+-- TODO bundle state in data-type
+-- TODO use `IO Either` as return type when it makes sense
 
 import System.Process
 import System.Posix.IO
