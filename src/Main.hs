@@ -136,13 +136,13 @@ acceptTCP :: Net.Socket -> MVar Want -> IO a
 acceptTCP s w = do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    _ <- forkIO $ recvTCP (handle, w)
+    forkIO $ recvTCP (handle, w)
     acceptTCP s w
 
 listenTCP :: Int -> MVar Want -> IO Net.Socket
 listenTCP p wants = do
     sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
-    _ <- forkIO $ acceptTCP sock wants
+    forkIO $ acceptTCP sock wants
     return sock
 
 main :: IO ()
@@ -156,19 +156,21 @@ main =
             done <- newEmptyMVar
             wants <- newMVar Up
 
-            _ <- installHandler sigPIPE Ignore Nothing
+            installHandler sigPIPE Ignore Nothing
             blockSignals $ addSignal sigCHLD emptySignalSet
 
             (readfd, writefd) <- createPipe
 
-            _ <- forkIO $ spawn done wants (dir cfg) (outCmd cfg) (outArgs cfg) [(Just readfd), Nothing, Nothing]
-            _ <- forkIO $ spawn done wants (dir cfg) (inCmd cfg) (inArgs cfg) [Nothing, (Just writefd), (Just writefd)]
+            forkIO $ spawn done wants (dir cfg) (outCmd cfg) (outArgs cfg) [(Just readfd), Nothing, Nothing]
+            forkIO $ spawn done wants (dir cfg) (inCmd cfg) (inArgs cfg) [Nothing, (Just writefd), (Just writefd)]
             
             sock <- case (port cfg) of
                 Nothing -> return Nothing
                 Just p  -> return (Just $ listenTCP p wants)
 
-            takeMVar done >> takeMVar done >> case sock of
+            takeMVar done >> takeMVar done
+
+            case sock of
                 Nothing -> return ()
                 Just s  -> s >>= Net.sClose
             
