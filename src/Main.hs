@@ -10,7 +10,7 @@ import System.Console.GetOpt
 import Control.Concurrent
 import System.IO hiding (stdin, stdout, stderr)
 import Data.Char
-
+import qualified Data.Traversable as T
 import qualified Network as Net
 
 data Want = Up | Down deriving (Show)
@@ -73,13 +73,9 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-maybeFdToHandle :: (Maybe Fd) -> IO (Maybe Handle)
-maybeFdToHandle Nothing   = return Nothing
-maybeFdToHandle (Just fd) = dup fd >>= fdToHandle >>= return . Just
-
 spawn :: MVar () -> MVar Want -> String -> String -> [String] -> [Maybe Fd] -> IO ()
 spawn done wants wd cmd args fds = do
-    [stdin, stdout, stderr] <- sequence $ map maybeFdToHandle fds
+    [stdin, stdout, stderr] <- T.mapM maybeFdToHandle fds
 
     p <- runProcess
         cmd args
@@ -101,6 +97,9 @@ spawn done wants wd cmd args fds = do
                     spawn done wants wd cmd args fds
                 Down -> -- exit
                     putMVar done () >> return ()
+    where
+        maybeFdToHandle :: (Maybe Fd) -> IO (Maybe Handle)
+        maybeFdToHandle fd = T.mapM (\x -> dup x >>= fdToHandle) fd
 
 getCmd :: IO (Config, String)
 getCmd = do
