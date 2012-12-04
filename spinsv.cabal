@@ -1,0 +1,30 @@
+name:                 spinsv
+version:              0.0.0
+synopsis:             a service runner inspired by runsv
+license:              GPL
+license-file:         LICENSE
+author:               Alexis Sellier <alexis@cloudhead.io>
+maintainer:           Alexis Sellier <alexis@cloudhead.io>
+homepage:             http://github.com/cloudhead/spinsv
+bug-reports:          http://github.com/cloudhead/spinsv/issues
+category:             Services, Daemons
+stability:            Experimental
+build-type:           Simple
+cabal-version:        >= 1.10
+description:          .
+extra-source-files:   README
+
+source-repository head
+  type:               git
+  location:           git://github.com/cloudhead/spinsv.git
+
+executable spin
+  main-is:            Main.hs
+  hs-source-dirs:     src
+  default-language:   Haskell2010
+  ghc-options:       -Wall -threaded
+  build-depends:      base
+                    , monad-control
+                    , unix
+                    , process
+                    , network

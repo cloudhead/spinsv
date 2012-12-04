@@ -1,0 +1,17 @@
+
+= spinsv
+
+  A service runner inspired by runsv.
+
+* building
+
+  $ make
+
+* running
+
+  See 'spinsv --help'
+
+* copyright
+
+  (C) 2012 Alexis Sellier <alexis@cloudhead.io>
+
