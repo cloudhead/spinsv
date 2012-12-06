@@ -1,19 +1,20 @@
 module Main where
 --
 -- TODO check 'async' module
--- TODO bundle state in data-type
 -- TODO use `IO Either` as return type when it makes sense
 
 import System.Process
 import System.Posix.IO
 import System.Posix (Fd)
 import System.Posix.Signals
+import System.Posix.Process
 import System.Exit
 import System.Environment
 import System.Console.GetOpt
 import Control.Concurrent
 import System.IO hiding (stdin, stdout, stderr)
 import Data.Char
+
 import qualified Data.Traversable as T
 import qualified Network as Net
 
@@ -30,11 +31,21 @@ data Config = Config
     , version :: Bool
     } deriving Show
 
+data Task = Task
+    { tCmd  :: String
+    , tArgs :: [String]
+    , tWant :: MVar Want
+    }
+
 versionString :: String
 versionString = "0.0.0"
 
 tee :: String
 tee = "tee"
+
+mkTask :: MVar Want -> Config -> (Config -> String) -> (Config -> [String]) -> Task
+mkTask w cfg cmdf argsf =
+    Task{tCmd = (cmdf cfg), tArgs = (argsf cfg), tWant = w}
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -77,12 +88,13 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-spawn :: MVar () -> MVar Want -> String -> String -> [String] -> [Maybe Fd] -> IO ()
-spawn done wants wd cmd args fds = do
+spawn :: MVar () -> String -> Task -> [Maybe Fd] -> IO ()
+spawn done wd t fds = do
     [stdin, stdout, stderr] <- T.mapM maybeFdToHandle fds
 
     p <- runProcess
-        cmd args
+        (tCmd t)
+        (tArgs t)
         (Just wd)
         Nothing
         stdin
@@ -94,11 +106,11 @@ spawn done wants wd cmd args fds = do
     case w of
         ExitSuccess   -> return ()
         ExitFailure _ -> do
-            want <- readMVar wants
+            want <- readMVar (tWant t)
 
             case want of
                 Up ->   -- restart
-                    spawn done wants wd cmd args fds
+                    spawn done wd t fds
                 Down -> -- exit
                     putMVar done () >> return ()
     where
@@ -164,8 +176,10 @@ main =
 
             (readfd, writefd) <- createPipe
 
-            forkIO $ spawn done wants (dir cfg) (outCmd cfg) (outArgs cfg) [(Just readfd), Nothing, Nothing]
-            forkIO $ spawn done wants (dir cfg) (inCmd cfg) (inArgs cfg) [Nothing, (Just writefd), (Just writefd)]
+            let spawn' = spawn done (dir cfg)
+
+            forkIO $ spawn' (mkTask wants cfg outCmd outArgs) [(Just readfd), Nothing, Nothing]
+            forkIO $ spawn' (mkTask wants cfg inCmd inArgs)   [Nothing, (Just writefd), (Just writefd)]
             
             sock <- case (port cfg) of
                 Nothing -> return Nothing
