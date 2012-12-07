@@ -91,32 +91,39 @@ options =
 
 spawn :: MVar () -> String -> Task -> [Maybe Fd] -> IO ()
 spawn done wd t fds = do
-    [stdin, stdout, stderr] <- T.mapM maybeFdToHandle fds
+    changeWorkingDirectory wd
+    pid <- forkProcess $ child fds
+    sequence $ map maybeClose fds
+    ps <- getProcessStatus True False pid
 
-    p <- runProcess
-        (tCmd t)
-        (tArgs t)
-        (Just wd)
-        Nothing
-        stdin
-        stdout
-        stderr
+    case ps of
+        Just status ->
+            case status of
+                Exited ExitSuccess -> return ()
+                _                  -> readMVar (tWant t) >>= failWith
+            where
+                failWith Up   = spawn done wd t fds
+                failWith Down = putMVar done () >> return ()
 
-    w <- waitForProcess p
+        Nothing ->
+            return ()
 
-    case w of
-        ExitSuccess   -> return ()
-        ExitFailure _ -> do
-            want <- readMVar (tWant t)
-
-            case want of
-                Up ->   -- restart
-                    spawn done wd t fds
-                Down -> -- exit
-                    putMVar done () >> return ()
     where
-        maybeFdToHandle :: (Maybe Fd) -> IO (Maybe Handle)
-        maybeFdToHandle fd = T.mapM (\x -> dup x >>= fdToHandle) fd
+        maybeClose :: Maybe Fd -> IO ()
+        maybeClose (Just fd) = closeFd fd
+        maybeClose _         = return ()
+
+        child :: [Maybe Fd] -> IO ()
+        child fds' = do
+            sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
+            sequence $ map maybeClose fds'
+
+            executeFile cmd True args Nothing
+
+            where
+                (cmd, args) = tCmd t
+                maybeDup (Just fd) std = dupTo fd std >> return ()
+                maybeDup Nothing   _   = return ()
 
 getCmd :: IO (Config, String)
 getCmd = do
