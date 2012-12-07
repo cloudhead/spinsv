@@ -3,20 +3,22 @@ module Main where
 -- TODO check 'async' module
 -- TODO use `IO Either` as return type when it makes sense
 
-import System.Process
 import System.Posix.IO
 import System.Posix (Fd)
 import System.Posix.Signals
 import System.Posix.Process
+import System.Posix.Directory
 import System.Exit
 import System.Environment
 import System.Console.GetOpt
 import Control.Concurrent
-import System.IO hiding (stdin, stdout, stderr)
+import System.IO
 import Data.Char
+import Control.Monad
 
-import qualified Data.Traversable as T
 import qualified Network as Net
+
+type Cmd = (String, [String])
 
 data Want = Up | Down deriving (Show)
 
@@ -32,8 +34,7 @@ data Config = Config
     } deriving Show
 
 data Task = Task
-    { tCmd  :: String
-    , tArgs :: [String]
+    { tCmd  :: Cmd
     , tWant :: MVar Want
     }
 
@@ -45,7 +46,7 @@ tee = "tee"
 
 mkTask :: MVar Want -> Config -> (Config -> String) -> (Config -> [String]) -> Task
 mkTask w cfg cmdf argsf =
-    Task{tCmd = (cmdf cfg), tArgs = (argsf cfg), tWant = w}
+    Task{tCmd = (cmdf cfg, argsf cfg), tWant = w}
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -142,17 +143,16 @@ handleReq wants line =
         ok    = "OK"
         err m = "ERROR" ++ m
 
-recvTCP :: (Handle, MVar Want) -> IO a
-recvTCP ctx@(handle, w) =
-    hGetLine handle >>= handleReq w >>= hPutStrLn handle >> recvTCP ctx
+recvTCP :: Handle -> MVar Want -> IO a
+recvTCP handle w =
+    forever $ hGetLine handle >>= handleReq w >>= hPutStrLn handle
     -- Consider using hGetChar
 
 acceptTCP :: Net.Socket -> MVar Want -> IO a
-acceptTCP s w = do
+acceptTCP s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO $ recvTCP (handle, w)
-    acceptTCP s w
+    forkIO $ recvTCP handle w
 
 listenTCP :: Int -> MVar Want -> IO Net.Socket
 listenTCP p wants = do
