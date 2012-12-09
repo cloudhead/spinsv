@@ -27,4 +27,5 @@ executable spinsv
                     , monad-control
                     , unix
                     , process
+                    , stm
                     , network
