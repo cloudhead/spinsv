@@ -17,6 +17,7 @@ import Control.Concurrent
 import System.IO
 import Control.Exception.Base hiding (handle)
 import Data.Char
+import Data.Maybe
 import Control.Monad
 
 import qualified Network as Net
@@ -41,7 +42,7 @@ data Config = Config
 data Task = Task
     { tCmd  :: Cmd
     , tPid  :: ProcessID
-    , tCtrl :: TMVar Event
+    , tWakeup :: TMVar ()
     }
 
 versionString :: String
@@ -50,9 +51,13 @@ versionString = "0.0.0"
 tee :: String
 tee = "tee"
 
-mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> TMVar Event -> Task
-mkTask cfg cmdf argsf ctrl =
-    Task{tCmd = (cmdf cfg, argsf cfg), tPid = -1, tCtrl = ctrl}
+mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> TMVar () -> Task
+mkTask cfg cmdf argsf wake =
+    Task{tCmd = (cmdf cfg, argsf cfg), tPid = -1, tWakeup = wake}
+
+wakeTask :: Task -> STM ()
+wakeTask t =
+    putTMVar (tWakeup t) ()
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -101,7 +106,7 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-data Event = TaskExited (Maybe ProcessStatus) | StartTask | StopTask
+data Event = Exit (Maybe ProcessStatus) | Wakeup
 
 spawn :: TMVar Want -> String -> Task -> [Maybe Fd] -> IO ()
 spawn wants wd t fds = do
@@ -112,14 +117,10 @@ spawn wants wd t fds = do
     where
         spawn' :: (Maybe ProcessID) -> TMVar Event -> IO ()
         spawn' mpid mvar = do
-            e <- atomically $ orElse (takeTMVar mvar) (takeTMVar $ tCtrl t)
-
-            -- TODO use `wants` as `tCtrl` - put value back into MVar only when the process
-            -- has exited. This allows us to easily stop the service process first, and
-            -- the logging process second.
-
+            e <- atomically $ orElse (takeTMVar mvar)
+                                     (takeTMVar (tWakeup t) >> return Wakeup)
             case e of
-                TaskExited ps -> do
+                Exit ps -> do
                     -- TODO Send signal to output process
                     case ps of
                         Just status ->
@@ -127,28 +128,36 @@ spawn wants wd t fds = do
                                 Exited ExitSuccess -> return ()
                                 _                  -> (atomically $ readTMVar wants) >>= failWith
                             where
-                                failWith Up   = atomically (putTMVar (tCtrl t) StartTask) >> restartDelay >> spawn' Nothing mvar
-                                failWith Down = return ()
+                                failWith Up   = restartDelay >> spawn' Nothing mvar
+                                failWith Down = spawn' Nothing mvar
                                 restartDelay  = threadDelay 1000000 -- 1 second
                         Nothing ->
                             return ()
-                StartTask -> do
-                    pid <- forkProcess $ child fds
-                    -- Normally, we would close the pipe descriptors (`fds`) here,
-                    -- but we need to be able to pass them to subsequent child processes
-                    -- as they are restarted on failure, so we leave them open.
-                    forkIO $ waitForExit pid mvar
-                    spawn' (Just pid) mvar
-                StopTask -> case mpid of
-                    Just pid ->
-                        signalProcess sigTERM pid
-                    _ ->
-                        return ()
+                Wakeup -> do
+                    w <- atomically $ readTMVar wants
+
+                    case w of
+                        Up | isNothing mpid -> do
+                            pid <- forkProcess $ child fds
+                            -- Normally, we would close the pipe descriptors (`fds`) here,
+                            -- but we need to be able to pass them to subsequent child processes
+                            -- as they are restarted on failure, so we leave them open.
+                            forkIO $ waitForExit pid mvar
+                            spawn' (Just pid) mvar
+                           | otherwise ->
+                            spawn' mpid mvar
+                        Down ->
+                            case mpid of
+                                Just pid -> do
+                                    signalProcess sigTERM pid
+                                    spawn' Nothing mvar
+                                _ ->
+                                    return ()
 
         waitForExit :: ProcessID -> TMVar Event -> IO ()
         waitForExit pid mvar = do
             ps <- getProcessStatus True False pid
-            atomically $ putTMVar mvar (TaskExited ps)
+            atomically $ putTMVar mvar (Exit ps)
 
         maybeClose :: Maybe Fd -> IO ()
         maybeClose (Just fd) = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
@@ -180,21 +189,20 @@ getCmd = do
             error $ head msgs
 
 handleReq :: (Task, Task) -> TMVar Want -> String -> IO String
-handleReq (inTask, outTask) wants line =
-    case line of
-        "?" -> fmap (map toLower . show) (atomically $ readTMVar wants)
-        "u" -> atomically (putTMVar wants Up)   >> startService inTask >> return ok
-        "d" -> atomically (putTMVar wants Down) >> stopService inTask >> return ok
-        "x" -> stopService inTask >> stopService outTask >> exitSuccess
-        cmd -> return $ err (" unknown command '" ++ cmd ++ "'")
+handleReq _ _ [] = return "NOP"
+handleReq (inTask, outTask) wants line@(c:_) =
+    case c of
+        '?' -> fmap (map toLower . show) (atomically $ readTMVar wants)
+        'u' -> atomically (swapTMVar wants Up   >> wakeTask inTask) >> return ok
+        'd' -> atomically (swapTMVar wants Down >> wakeTask inTask) >> return ok
+        'x' -> atomically (swapTMVar wants Down >> wakeTask inTask  >> wakeTask outTask) >> exitSuccess
+        ___ -> return $ err (" unknown command '" ++ line ++ "'")
     where
         ok            = "OK"
         err m         = "ERROR" ++ m
-        stopService t = atomically $ putTMVar (tCtrl t) StartTask
-        startService t = atomically $ putTMVar (tCtrl t) StopTask
 
 recvTCP :: (Task, Task) -> Handle -> TMVar Want -> IO a
-recvTCP tasks handle w =
+recvTCP tasks handle w = do
     forever $ hGetLine handle >>= handleReq tasks w >>= hPutStrLn handle
     -- Consider using hGetChar
 
@@ -219,8 +227,8 @@ main =
         execute (cfg, n) | help    cfg = putStrLn (helpString n) >> exitSuccess
         execute (cfg, _) = do
             wants   <- newTMVarIO (want cfg)
-            ctrlIn  <- newTMVarIO StartTask
-            ctrlOut <- newTMVarIO StartTask
+            wakeIn  <- newTMVarIO ()
+            wakeOut <- newTMVarIO ()
 
             installHandler sigPIPE Ignore Nothing
             blockSignals $ addSignal sigCHLD emptySignalSet
@@ -231,18 +239,19 @@ main =
 
             let fork task fds = forkFinally (spawn wants (dir cfg) task fds) (\_ -> putMVar done ()) in do
 
-                fork (outTask ctrlOut) [Just readfd, Nothing, Nothing]
-                fork (inTask ctrlIn)   [Nothing, Just writefd, Just writefd]
+                fork (outTask wakeOut) [Just readfd, Nothing, Nothing]
+                fork (inTask wakeIn)   [Nothing, Just writefd, Just writefd]
 
             sock <- case (port cfg) of
-                Nothing -> return Nothing -- is it ok to duplicate tasks?
-                Just p  -> return (Just $ listenTCP (inTask ctrlIn, outTask ctrlOut) p wants)
+                Nothing -> return Nothing
+                Just p  -> do
+                    listenTCP (inTask wakeIn, outTask wakeOut) p wants >>= return . Just
 
             takeMVar done >> takeMVar done
 
             case sock of
                 Nothing -> return ()
-                Just s  -> s >>= Net.sClose
+                Just s  -> Net.sClose s
 
             where
                 inTask  = mkTask cfg inCmd inArgs
