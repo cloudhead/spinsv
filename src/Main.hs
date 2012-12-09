@@ -120,19 +120,17 @@ spawn wants wd t fds = do
             e <- atomically $ orElse (takeTMVar mvar)
                                      (takeTMVar (tWakeup t) >> return Wakeup)
             case e of
-                Exit ps -> do
-                    -- TODO Send signal to output process
-                    case ps of
-                        Just status ->
-                            case status of
-                                Exited ExitSuccess -> return ()
-                                _                  -> (atomically $ readTMVar wants) >>= failWith
-                            where
-                                failWith Up   = restartDelay >> spawn' Nothing mvar
-                                failWith Down = spawn' Nothing mvar
-                                restartDelay  = threadDelay 1000000 -- 1 second
-                        Nothing ->
-                            return ()
+                -- TODO Send signal to output process
+                Exit (Just (Exited ExitSuccess)) ->
+                    return ()
+                Exit (Just _) ->
+                    atomically (readTMVar wants) >>= failWith
+                    where
+                        failWith Up   = restartDelay >> spawn' Nothing mvar
+                        failWith Down = spawn' Nothing mvar
+                        restartDelay  = threadDelay 1000000 -- 1 second
+                Exit Nothing ->
+                    return ()
                 Wakeup -> do
                     w <- atomically $ readTMVar wants
 
