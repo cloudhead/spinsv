@@ -190,12 +190,12 @@ getCmd = do
 
 handleReq :: (Task, Task) -> TMVar Want -> String -> IO String
 handleReq _ _ [] = return "NOP"
-handleReq (inTask, outTask) wants line@(c:_) =
-    case c of
-        '?' -> fmap (map toLower . show) (atomically $ readTMVar wants)
+handleReq (inTask, outTask) wants line =
+    case head line of
+        's' -> fmap (map toLower . show) (atomically $ readTMVar wants)
         'u' -> atomically (swapTMVar wants Up   >> wakeTask inTask) >> return ok
         'd' -> atomically (swapTMVar wants Down >> wakeTask inTask) >> return ok
-        'x' -> atomically (swapTMVar wants Down >> wakeTask inTask  >> wakeTask outTask) >> exitSuccess
+        'x' -> atomically (swapTMVar wants Down >> mapM wakeTask [inTask, outTask]) >> exitSuccess
         ___ -> return $ err (" unknown command '" ++ line ++ "'")
     where
         ok            = "OK"
