@@ -1,10 +1,6 @@
 
 CABAL := cabal
 
-build: configure
+build:
 	$(CABAL) build
 
-dist:
-	$(CABAL) configure
-
-configure: ./dist
