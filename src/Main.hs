@@ -41,7 +41,6 @@ data Config = Config
 
 data Task = Task
     { tCmd  :: Cmd
-    , tPid  :: ProcessID
     , tWakeup :: TMVar ()
     }
 
@@ -53,7 +52,7 @@ tee = "tee"
 
 mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> TMVar () -> Task
 mkTask cfg cmdf argsf wake =
-    Task{tCmd = (cmdf cfg, argsf cfg), tPid = -1, tWakeup = wake}
+    Task{tCmd = (cmdf cfg, argsf cfg), tWakeup = wake}
 
 wakeTask :: Task -> STM ()
 wakeTask t =
