@@ -156,21 +156,18 @@ spawn wants wd t fds = do
             ps <- getProcessStatus True False pid
             atomically $ putTMVar mvar (Exit ps)
 
-        maybeClose :: Maybe Fd -> IO ()
-        maybeClose (Just fd) = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
-        maybeClose _         = return ()
-
         child :: [Maybe Fd] -> IO ()
         child fds' = do
             sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
-            sequence $ map maybeClose fds'
+            sequence $ map closeFd' (catMaybes fds')
 
             executeFile cmd True args Nothing
 
             where
-                (cmd, args) = tCmd t
+                (cmd, args)            = tCmd t
                 maybeDup (Just fd) std = dupTo fd std >> return ()
                 maybeDup Nothing   _   = return ()
+                closeFd' fd            = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
 
 getCmd :: IO (Config, String)
 getCmd = do
