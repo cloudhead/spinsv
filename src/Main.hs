@@ -32,6 +32,7 @@ data Config = Config
     , inArgs  :: [String]
     , outArgs :: [String]
     , port    :: Maybe Int
+    , delay   :: Int
     , dir     :: String
     , want    :: Want
     , onExit  :: Maybe Int
@@ -66,6 +67,7 @@ defaultConfig = Config
     , inArgs  = []
     , outArgs = []
     , port    = Nothing
+    , delay   = 1000
     , dir     = "."
     , want    = Up
     , onExit  = Nothing
@@ -94,6 +96,8 @@ options =
         (ReqArg (\o cfg -> cfg{outArgs = outArgs cfg ++ [o]}) "<arg>")  "output argument (may be given multiple times)"
     , Option [] ["port"]
         (ReqArg (\o cfg -> cfg{port = Just $ read o})         "<port>") "port to bind to (optional)"
+    , Option [] ["restart-delay"]
+        (ReqArg (\o cfg -> cfg{delay = read o})              "<delay>") "restart delay in milliseconds (1000)"
 --  , Option [] ["on-exit"]
 --      (ReqArg (\o cfg -> cfg{onExit = Just $ read o})     "<signal>") "send <signal> to output on input exit (IGNORED)"
     , Option [] ["dir"]
@@ -108,13 +112,13 @@ options =
 
 data Event = Exit (Maybe ProcessStatus) | Wakeup
 
-spawn :: Task -> TMVar Want -> String -> [Maybe Fd] -> IO ()
-spawn t wants wd fds =
-    changeWorkingDirectory wd >> newEmptyTMVarIO >>= \mvar ->
-        loop (wants, t, fds) mvar Nothing
+spawn :: Task -> TMVar Want -> Config -> [Maybe Fd] -> IO ()
+spawn t wants cfg fds =
+    changeWorkingDirectory (dir cfg) >> newEmptyTMVarIO >>= \mvar ->
+        loop (wants, t, cfg, fds) mvar Nothing
 
-loop :: (TMVar Want, Task, [Maybe Fd]) -> TMVar Event -> Maybe ProcessID -> IO ()
-loop state@(wants, t, fds) mvar mpid = do
+loop :: (TMVar Want, Task, Config, [Maybe Fd]) -> TMVar Event -> Maybe ProcessID -> IO ()
+loop state@(wants, t, cfg, fds) mvar mpid = do
     e <- atomically $ orElse (takeTMVar mvar)
                              (takeTMVar (tWakeup t) >> return Wakeup)
     case e of
@@ -126,7 +130,7 @@ loop state@(wants, t, fds) mvar mpid = do
             where
                 failWith Up   = restartDelay >> start >>= loop state mvar
                 failWith Down = loop state mvar Nothing
-                restartDelay  = threadDelay 1000000 -- 1 second
+                restartDelay  = threadDelay $ 1000 * (delay cfg)
         Exit Nothing ->
             return ()
         Wakeup -> do
@@ -224,7 +228,7 @@ listenTCP tasks p wants = do
 fork :: Task -> TMVar Want ->  Config -> [Maybe Fd] -> IO (MVar ())
 fork task wants cfg fds = do
     done <- newEmptyMVar
-    forkFinally (spawn task wants (dir cfg) fds) (\_ -> putMVar done ())
+    forkFinally (spawn task wants cfg fds) (\_ -> putMVar done ())
     return done
 
 maybeListenTCP :: (Task, Task) -> Maybe Int -> TMVar Want -> IO (Maybe Net.Socket)
