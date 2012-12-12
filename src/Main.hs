@@ -50,9 +50,10 @@ versionString = "0.0.0"
 tee :: String
 tee = "tee"
 
-mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> TMVar () -> Task
-mkTask cfg cmdf argsf wake =
-    Task{tCmd = (cmdf cfg, argsf cfg), tWakeup = wake}
+mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> IO Task
+mkTask cfg cmdf argsf = do
+    wake <- newTMVarIO ()
+    return Task{tCmd = (cmdf cfg, argsf cfg), tWakeup = wake}
 
 wakeTask :: Task -> STM ()
 wakeTask t =
@@ -107,8 +108,8 @@ options =
 
 data Event = Exit (Maybe ProcessStatus) | Wakeup
 
-spawn :: TMVar Want -> String -> Task -> [Maybe Fd] -> IO ()
-spawn wants wd t fds =
+spawn :: Task -> TMVar Want -> String -> [Maybe Fd] -> IO ()
+spawn t wants wd fds =
     changeWorkingDirectory wd >> newEmptyTMVarIO >>= \mvar ->
         loop (wants, t, fds) mvar Nothing
 
@@ -151,6 +152,7 @@ spawnProcess t fds mvar = do
     -- Normally, we would close the pipe descriptors (`fds`) here,
     -- but we need to be able to pass them to subsequent child processes
     -- as they are restarted on failure, so we leave them open.
+
     forkIO $ waitForExit pid mvar
 
     return pid
@@ -201,9 +203,8 @@ handleReq (inTask, outTask) wants line =
         err m         = "ERROR" ++ m
 
 recvTCP :: (Task, Task) -> Handle -> TMVar Want -> IO a
-recvTCP tasks handle w = do
-    forever $ hGetLine handle >>= handleReq tasks w >>= hPutStrLn handle
-    -- Consider using hGetChar
+recvTCP tasks handle w = forever $ do
+    hGetLine handle >>= handleReq tasks w >>= hPutStrLn handle
 
 acceptTCP :: (Task, Task) -> Net.Socket -> TMVar Want -> IO a
 acceptTCP tasks s w = forever $ do
@@ -217,6 +218,24 @@ listenTCP tasks p wants = do
     forkIO $ acceptTCP tasks sock wants
     return sock
 
+fork :: Task -> TMVar Want ->  Config -> [Maybe Fd] -> IO (MVar ())
+fork task wants cfg fds = do
+    done <- newEmptyMVar
+    forkFinally (spawn task wants (dir cfg) fds) (\_ -> putMVar done ())
+    return done
+
+maybeListenTCP :: (Task, Task) -> Maybe Int -> TMVar Want -> IO (Maybe Net.Socket)
+maybeListenTCP tasks (Just port') wants =
+    listenTCP tasks port' wants >>= return . Just
+maybeListenTCP _ Nothing _ =
+    return Nothing
+
+closeMaybeSock :: Maybe Net.Socket -> IO ()
+closeMaybeSock (Just sock) =
+    Net.sClose sock
+closeMaybeSock _ =
+    return ()
+
 main :: IO ()
 main =
     getCmd >>= execute
@@ -225,34 +244,22 @@ main =
         execute (cfg, _) | version cfg = putStrLn versionString  >> exitSuccess
         execute (cfg, n) | help    cfg = putStrLn (helpString n) >> exitSuccess
         execute (cfg, _) = do
-            wants   <- newTMVarIO (want cfg)
-            wakeIn  <- newTMVarIO ()
-            wakeOut <- newTMVarIO ()
+            wants <- newTMVarIO (want cfg)
 
             installHandler sigPIPE Ignore Nothing
             blockSignals $ addSignal sigCHLD emptySignalSet
 
             (readfd, writefd) <- createPipe
 
-            done <- newEmptyMVar
+            outTask <- mkTask cfg outCmd outArgs
+            inTask  <- mkTask cfg inCmd inArgs
 
-            let fork task fds = forkFinally (spawn wants (dir cfg) task fds) (\_ -> putMVar done ()) in do
+            maybeSock <- maybeListenTCP (inTask, outTask) (port cfg) wants
 
-                fork (outTask wakeOut) [Just readfd, Nothing, Nothing]
-                fork (inTask wakeIn)   [Nothing, Just writefd, Just writefd]
+            outDone <- fork outTask wants cfg [Just readfd, Nothing, Nothing]
+            inDone  <- fork inTask  wants cfg [Nothing, Just writefd, Just writefd]
 
-            sock <- case (port cfg) of
-                Nothing -> return Nothing
-                Just p  -> do
-                    listenTCP (inTask wakeIn, outTask wakeOut) p wants >>= return . Just
+            takeMVar inDone >> takeMVar outDone
 
-            takeMVar done >> takeMVar done
-
-            case sock of
-                Nothing -> return ()
-                Just s  -> Net.sClose s
-
-            where
-                inTask  = mkTask cfg inCmd inArgs
-                outTask = mkTask cfg outCmd outArgs
+            closeMaybeSock maybeSock
 
