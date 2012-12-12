@@ -108,54 +108,54 @@ options =
 data Event = Exit (Maybe ProcessStatus) | Wakeup
 
 spawn :: TMVar Want -> String -> Task -> [Maybe Fd] -> IO ()
-spawn wants wd t fds = do
-    changeWorkingDirectory wd
+spawn wants wd t fds =
+    changeWorkingDirectory wd >> newEmptyTMVarIO >>= \mvar ->
+        loop (wants, t, fds) mvar Nothing
 
-    newEmptyTMVarIO >>= spawn' Nothing
+loop :: (TMVar Want, Task, [Maybe Fd]) -> TMVar Event -> Maybe ProcessID -> IO ()
+loop state@(wants, t, fds) mvar mpid = do
+    e <- atomically $ orElse (takeTMVar mvar)
+                             (takeTMVar (tWakeup t) >> return Wakeup)
+    case e of
+        -- TODO Send signal to output process
+        Exit (Just (Exited ExitSuccess)) ->
+            return ()
+        Exit (Just _) ->
+            atomically (readTMVar wants) >>= failWith
+            where
+                failWith Up   = restartDelay >> loop state mvar Nothing
+                failWith Down = loop state mvar Nothing
+                restartDelay  = threadDelay 1000000 -- 1 second
+        Exit Nothing ->
+            return ()
+        Wakeup -> do
+            w <- atomically $ readTMVar wants
+
+            loop state mvar =<< case w of
+                Up | isNothing mpid -> do
+                    pid <- spawnProcess t fds mvar
+                    return (Just pid)
+                Up -> -- ignore
+                    return mpid
+                Down ->
+                    case mpid of
+                        Just pid ->
+                            signalProcess sigTERM pid >> return Nothing
+                        _ ->
+                            return mpid
+
+spawnProcess :: Task -> [Maybe Fd] -> TMVar Event -> IO ProcessID
+spawnProcess t fds mvar = do
+    pid <- forkProcess $ child fds
+
+    -- Normally, we would close the pipe descriptors (`fds`) here,
+    -- but we need to be able to pass them to subsequent child processes
+    -- as they are restarted on failure, so we leave them open.
+    forkIO $ waitForExit pid mvar
+
+    return pid
 
     where
-        spawn' :: (Maybe ProcessID) -> TMVar Event -> IO ()
-        spawn' mpid mvar = do
-            e <- atomically $ orElse (takeTMVar mvar)
-                                     (takeTMVar (tWakeup t) >> return Wakeup)
-            case e of
-                -- TODO Send signal to output process
-                Exit (Just (Exited ExitSuccess)) ->
-                    return ()
-                Exit (Just _) ->
-                    atomically (readTMVar wants) >>= failWith
-                    where
-                        failWith Up   = restartDelay >> spawn' Nothing mvar
-                        failWith Down = spawn' Nothing mvar
-                        restartDelay  = threadDelay 1000000 -- 1 second
-                Exit Nothing ->
-                    return ()
-                Wakeup -> do
-                    w <- atomically $ readTMVar wants
-
-                    case w of
-                        Up | isNothing mpid -> do
-                            pid <- forkProcess $ child fds
-                            -- Normally, we would close the pipe descriptors (`fds`) here,
-                            -- but we need to be able to pass them to subsequent child processes
-                            -- as they are restarted on failure, so we leave them open.
-                            forkIO $ waitForExit pid mvar
-                            spawn' (Just pid) mvar
-                           | otherwise ->
-                            spawn' mpid mvar
-                        Down ->
-                            case mpid of
-                                Just pid -> do
-                                    signalProcess sigTERM pid
-                                    spawn' Nothing mvar
-                                _ ->
-                                    return ()
-
-        waitForExit :: ProcessID -> TMVar Event -> IO ()
-        waitForExit pid mvar = do
-            ps <- getProcessStatus True False pid
-            atomically $ putTMVar mvar (Exit ps)
-
         child :: [Maybe Fd] -> IO ()
         child fds' = do
             sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
@@ -168,6 +168,11 @@ spawn wants wd t fds = do
                 maybeDup (Just fd) std = dupTo fd std >> return ()
                 maybeDup Nothing   _   = return ()
                 closeFd' fd            = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
+
+        waitForExit :: ProcessID -> TMVar Event -> IO ()
+        waitForExit pid m = do
+            ps <- getProcessStatus True False pid
+            atomically $ putTMVar m (Exit ps)
 
 getCmd :: IO (Config, String)
 getCmd = do
