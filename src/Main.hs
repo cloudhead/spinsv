@@ -224,8 +224,8 @@ acceptTCP tasks cfg s w = forever $ do
     hSetBuffering handle NoBuffering
     forkIO $ recvTCP tasks cfg handle w
 
-listenTCP :: (Task, Task) -> Config -> TMVar Want -> IO (Maybe Net.Socket)
-listenTCP tasks cfg wants =
+maybeListenTCP :: (Task, Task) -> Config -> TMVar Want -> IO (Maybe Net.Socket)
+maybeListenTCP tasks cfg wants =
     case (port cfg) of
         Just p -> do
             sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
@@ -234,17 +234,17 @@ listenTCP tasks cfg wants =
         Nothing ->
             return Nothing
 
-fork :: Task -> TMVar Want ->  Config -> [Maybe Fd] -> IO (MVar ())
-fork task wants cfg fds = do
-    done <- newEmptyMVar
-    forkFinally (spawn task wants cfg fds) (\_ -> putMVar done ())
-    return done
-
 closeMaybeSock :: Maybe Net.Socket -> IO ()
 closeMaybeSock (Just sock) =
     Net.sClose sock
 closeMaybeSock _ =
     return ()
+
+fork :: Task -> TMVar Want ->  Config -> [Maybe Fd] -> IO (MVar ())
+fork task wants cfg fds = do
+    done <- newEmptyMVar
+    forkFinally (spawn task wants cfg fds) (\_ -> putMVar done ())
+    return done
 
 main :: IO ()
 main =
@@ -264,7 +264,7 @@ main =
             outTask <- mkTask cfg outCmd outArgs
             inTask  <- mkTask cfg inCmd inArgs
 
-            maybeSock <- listenTCP (inTask, outTask) cfg wants
+            maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
 
             outDone <- fork outTask wants cfg [Just readfd, Nothing, Nothing]
             inDone  <- fork inTask  wants cfg [Nothing, Just writefd, Just writefd]
