@@ -124,7 +124,7 @@ loop state@(wants, t, fds) mvar mpid = do
         Exit (Just _) ->
             atomically (readTMVar wants) >>= failWith
             where
-                failWith Up   = restartDelay >> loop state mvar Nothing
+                failWith Up   = restartDelay >> start >>= loop state mvar
                 failWith Down = loop state mvar Nothing
                 restartDelay  = threadDelay 1000000 -- 1 second
         Exit Nothing ->
@@ -133,9 +133,8 @@ loop state@(wants, t, fds) mvar mpid = do
             w <- atomically $ readTMVar wants
 
             loop state mvar =<< case w of
-                Up | isNothing mpid -> do
-                    pid <- spawnProcess t fds mvar
-                    return (Just pid)
+                Up | isNothing mpid ->
+                    start
                 Up -> -- ignore
                     return mpid
                 Down ->
@@ -144,6 +143,10 @@ loop state@(wants, t, fds) mvar mpid = do
                             signalProcess sigTERM pid >> return Nothing
                         _ ->
                             return mpid
+    where
+        start :: IO (Maybe ProcessID)
+        start =
+            spawnProcess t fds mvar >>= return . Just
 
 spawnProcess :: Task -> [Maybe Fd] -> TMVar Event -> IO ProcessID
 spawnProcess t fds mvar = do
