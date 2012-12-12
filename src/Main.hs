@@ -2,10 +2,10 @@ module Main where
 --
 -- TODO check 'async' module
 -- TODO use `IO Either` as return type when it makes sense
-
+-- TODO handle ^C properly on tcp connection
+--
 import System.Posix.IO
 import System.Posix (Fd)
-import System.Posix.Signals
 import System.Posix.Process
 import System.Posix.Types (ProcessID)
 import System.Posix.Directory
@@ -20,7 +20,8 @@ import Data.Char
 import Data.Maybe
 import Control.Monad
 
-import qualified Network as Net
+import qualified System.Posix.Signals as Sig
+import qualified Network              as Net
 
 type Cmd = (String, [String])
 
@@ -34,6 +35,7 @@ data Config = Config
     , port    :: Maybe Int
     , delay   :: Int
     , ident   :: Maybe String
+    , maxRe   :: Maybe Int
     , dir     :: String
     , want    :: Want
     , help    :: Bool
@@ -44,6 +46,13 @@ data Task = Task
     { tCmd  :: Cmd
     , tWakeup :: TMVar ()
     }
+
+data Event = Exit (Maybe ProcessStatus) | Wakeup
+
+data Action = Start
+            | Restart
+            | Ignore
+            | Terminate ProcessID
 
 versionString :: String
 versionString = "0.0.0"
@@ -69,6 +78,7 @@ defaultConfig = Config
     , port    = Nothing
     , delay   = 1000
     , ident   = Nothing
+    , maxRe   = Nothing
     , dir     = "."
     , want    = Up
     , help    = False
@@ -100,6 +110,8 @@ options =
         (ReqArg (\o cfg -> cfg{ident = Just $ o})               "<id>") "bind to an identifier (optional)"
     , Option [] ["restart-delay"]
         (ReqArg (\o cfg -> cfg{delay = read o})              "<delay>") "restart delay in milliseconds (1000)"
+    , Option [] ["max-restarts"]
+        (ReqArg (\o cfg -> cfg{maxRe = Just $ read o})         "<num>") "max number of restarts on failure (optional)"
     , Option [] ["dir"]
         (ReqArg (\o cfg -> cfg{dir = o})                      "<dir>")  "directory to run in (.)"
     , Option [] ["down"]
@@ -110,47 +122,41 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-data Event = Exit (Maybe ProcessStatus) | Wakeup
-
-spawn :: Task -> TMVar Want -> Config -> [Maybe Fd] -> IO ()
+spawn :: Task -> TMVar Want -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
 spawn t wants cfg fds =
     changeWorkingDirectory (dir cfg) >> newEmptyTMVarIO >>= \mvar ->
-        loop (wants, t, cfg, fds) mvar Nothing
+        loop (wants, t, cfg, fds) 0 mvar Nothing
 
-loop :: (TMVar Want, Task, Config, [Maybe Fd]) -> TMVar Event -> Maybe ProcessID -> IO ()
-loop state@(wants, t, cfg, fds) mvar mpid = do
+loop :: (TMVar Want, Task, Config, [Maybe Fd]) -> Int -> TMVar Event -> Maybe ProcessID -> IO (Maybe ProcessID)
+loop state@(wants, t, cfg, fds) restarts mvar mpid = do
     e <- atomically $ orElse (takeTMVar mvar)
                              (takeTMVar (tWakeup t) >> return Wakeup)
-    case e of
-        -- TODO Send signal to output process
-        Exit (Just (Exited ExitSuccess)) ->
-            return ()
-        Exit (Just _) ->
-            atomically (readTMVar wants) >>= failWith
-            where
-                failWith Up   = restartDelay >> start >>= loop state mvar
-                failWith Down = loop state mvar Nothing
-                restartDelay  = threadDelay $ 1000 * (delay cfg)
-        Exit Nothing ->
-            return ()
-        Wakeup -> do
-            w <- atomically $ readTMVar wants
+    w <- atomically $ (readTMVar wants)
 
-            loop state mvar =<< case w of
-                Up | isNothing mpid ->
-                    start
-                Up -> -- ignore
-                    return mpid
-                Down ->
-                    case mpid of
-                        Just pid ->
-                            signalProcess sigTERM pid >> return Nothing
-                        _ ->
-                            return mpid
+    case decide e cfg w mpid restarts of
+        Start         -> start >>= awaitPid
+        Restart       -> restartDelay >> start >>= loop state (restarts + 1) mvar
+        Ignore        -> awaitPid Nothing
+        Terminate pid -> Sig.signalProcess Sig.sigTERM pid >> awaitPid Nothing
+
     where
-        start :: IO (Maybe ProcessID)
-        start =
-            spawnProcess t fds mvar >>= return . Just
+        start         = spawnProcess t fds mvar >>= return . Just
+        awaitPid      = loop state restarts mvar
+        restartDelay  = threadDelay $ 1000 * (delay cfg)
+
+decide :: Event -> Config -> Want -> (Maybe ProcessID) -> Int -> Action
+decide (Exit Nothing)                     _ _ _ _ = Ignore
+decide (Exit (Just (Exited ExitSuccess))) _ _ _ _ = Ignore
+decide (Exit (Just _)) cfg w _ restarts = failWith w (maxRe cfg)
+    where
+        failWith Up Nothing                 = Restart
+        failWith Up (Just m) | restarts < m = Restart
+        failWith Up   _                     = Ignore
+        failWith Down _                     = Ignore
+decide Wakeup _ Up   Nothing    _ = Start
+decide Wakeup _ Up   (Just _)   _ = Ignore
+decide Wakeup _ Down (Just pid) _ = Terminate pid
+decide Wakeup _ Down Nothing    _ = Ignore
 
 spawnProcess :: Task -> [Maybe Fd] -> TMVar Event -> IO ProcessID
 spawnProcess t fds mvar = do
@@ -247,13 +253,13 @@ main =
     getCmd >>= execute
 
     where
-        execute (cfg, _) | version cfg = putStrLn versionString  >> exitSuccess
+        execute (cfg, n) | version cfg = putStrLn (unwords [n, "version", versionString])  >> exitSuccess
         execute (cfg, n) | help    cfg = putStrLn (helpString n) >> exitSuccess
         execute (cfg, _) = do
             wants <- newTMVarIO (want cfg)
 
-            installHandler sigPIPE Ignore Nothing
-            blockSignals $ addSignal sigCHLD emptySignalSet
+            Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
+            Sig.blockSignals $ Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
 
             (readfd, writefd) <- createPipe
 
