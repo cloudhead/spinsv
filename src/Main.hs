@@ -174,7 +174,7 @@ spawnProcess t fds mvar = do
         child :: [Maybe Fd] -> IO ()
         child fds' = do
             sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
-            sequence $ map closeFd' (catMaybes fds')
+                    ++ map closeFd' (catMaybes fds')
 
             executeFile cmd True args Nothing
 
