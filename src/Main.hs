@@ -33,6 +33,7 @@ data Config = Config
     , outArgs :: [String]
     , port    :: Maybe Int
     , delay   :: Int
+    , ident   :: Maybe String
     , dir     :: String
     , want    :: Want
     , onExit  :: Maybe Int
@@ -68,6 +69,7 @@ defaultConfig = Config
     , outArgs = []
     , port    = Nothing
     , delay   = 1000
+    , ident   = Nothing
     , dir     = "."
     , want    = Up
     , onExit  = Nothing
@@ -96,6 +98,8 @@ options =
         (ReqArg (\o cfg -> cfg{outArgs = outArgs cfg ++ [o]}) "<arg>")  "output argument (may be given multiple times)"
     , Option [] ["port"]
         (ReqArg (\o cfg -> cfg{port = Just $ read o})         "<port>") "port to bind to (optional)"
+    , Option [] ["id"]
+        (ReqArg (\o cfg -> cfg{ident = Just $ o})               "<id>") "bind to an identifier (optional)"
     , Option [] ["restart-delay"]
         (ReqArg (\o cfg -> cfg{delay = read o})              "<delay>") "restart delay in milliseconds (1000)"
 --  , Option [] ["on-exit"]
@@ -196,46 +200,45 @@ getCmd = do
         (_, _, msgs) ->
             error $ head msgs
 
-handleReq :: (Task, Task) -> TMVar Want -> String -> IO String
-handleReq _ _ [] = return "NOP"
-handleReq (inTask, outTask) wants line =
+handleReq :: (Task, Task) -> Config -> TMVar Want -> String -> IO String
+handleReq _ _ _ [] = return "NOP"
+handleReq (inTask, outTask) cfg wants line =
     case head line of
         's' -> fmap (map toLower . show) (atomically $ readTMVar wants)
         'u' -> atomically (swapTMVar wants Up   >> wakeTask inTask) >> return ok
         'd' -> atomically (swapTMVar wants Down >> wakeTask inTask) >> return ok
         'x' -> atomically (swapTMVar wants Down >> mapM wakeTask [inTask, outTask]) >> exitSuccess
+        'i' -> return $ fromMaybe "n/a" (ident cfg)
         ___ -> return $ err (" unknown command '" ++ line ++ "'")
     where
         ok            = "OK"
         err m         = "ERROR" ++ m
 
-recvTCP :: (Task, Task) -> Handle -> TMVar Want -> IO a
-recvTCP tasks handle w = forever $ do
-    hGetLine handle >>= handleReq tasks w >>= hPutStrLn handle
+recvTCP :: (Task, Task) -> Config -> Handle -> TMVar Want -> IO a
+recvTCP tasks cfg handle w = forever $ do
+    hGetLine handle >>= handleReq tasks cfg w >>= hPutStrLn handle
 
-acceptTCP :: (Task, Task) -> Net.Socket -> TMVar Want -> IO a
-acceptTCP tasks s w = forever $ do
+acceptTCP :: (Task, Task) -> Config -> Net.Socket -> TMVar Want -> IO a
+acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO $ recvTCP tasks handle w
+    forkIO $ recvTCP tasks cfg handle w
 
-listenTCP :: (Task, Task) -> Int -> TMVar Want -> IO Net.Socket
-listenTCP tasks p wants = do
-    sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
-    forkIO $ acceptTCP tasks sock wants
-    return sock
+listenTCP :: (Task, Task) -> Config -> TMVar Want -> IO (Maybe Net.Socket)
+listenTCP tasks cfg wants =
+    case (port cfg) of
+        Just p -> do
+            sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
+            forkIO $ acceptTCP tasks cfg sock wants
+            return (Just sock)
+        Nothing ->
+            return Nothing
 
 fork :: Task -> TMVar Want ->  Config -> [Maybe Fd] -> IO (MVar ())
 fork task wants cfg fds = do
     done <- newEmptyMVar
     forkFinally (spawn task wants cfg fds) (\_ -> putMVar done ())
     return done
-
-maybeListenTCP :: (Task, Task) -> Maybe Int -> TMVar Want -> IO (Maybe Net.Socket)
-maybeListenTCP tasks (Just port') wants =
-    listenTCP tasks port' wants >>= return . Just
-maybeListenTCP _ Nothing _ =
-    return Nothing
 
 closeMaybeSock :: Maybe Net.Socket -> IO ()
 closeMaybeSock (Just sock) =
@@ -261,7 +264,7 @@ main =
             outTask <- mkTask cfg outCmd outArgs
             inTask  <- mkTask cfg inCmd inArgs
 
-            maybeSock <- maybeListenTCP (inTask, outTask) (port cfg) wants
+            maybeSock <- listenTCP (inTask, outTask) cfg wants
 
             outDone <- fork outTask wants cfg [Just readfd, Nothing, Nothing]
             inDone  <- fork inTask  wants cfg [Nothing, Just writefd, Just writefd]
