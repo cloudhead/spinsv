@@ -25,7 +25,7 @@ import qualified Network              as Net
 
 type Cmd = (String, [String])
 
-data Want = Up | Down deriving (Show)
+data Want = Up | Down deriving (Show, Eq)
 
 data Config = Config
     { inCmd   :: String
@@ -44,10 +44,10 @@ data Config = Config
 
 data Task = Task
     { tCmd  :: Cmd
-    , tWakeup :: TMVar ()
+    , tWant :: TMVar Want
     }
 
-data Event = Exit (Maybe ProcessStatus) | Wakeup
+data Event = Exit (Maybe ProcessStatus) | Transition Want
 
 data Action = Start
             | Restart
@@ -60,14 +60,14 @@ versionString = "0.0.0"
 tee :: String
 tee = "tee"
 
-mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> IO Task
-mkTask cfg cmdf argsf = do
-    wake <- newTMVarIO ()
-    return Task{tCmd = (cmdf cfg, argsf cfg), tWakeup = wake}
+mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
+mkTask cfg cmdf argsf w = do
+    wants <- newTMVarIO w
+    return Task{tCmd = (cmdf cfg, argsf cfg), tWant = wants}
 
-wakeTask :: Task -> STM ()
-wakeTask t =
-    putTMVar (tWakeup t) ()
+transition :: Want -> Task -> STM ()
+transition w t =
+    putTMVar (tWant t) w
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -122,22 +122,24 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-spawn :: Task -> TMVar Want -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
-spawn t wants cfg fds =
+spawn :: Task -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
+spawn t cfg fds =
     changeWorkingDirectory (dir cfg) >> newEmptyTMVarIO >>= \mvar ->
-        loop (wants, t, cfg, fds) 0 mvar Nothing
+        loop (t, cfg, fds) 0 mvar (want cfg) Nothing
 
-loop :: (TMVar Want, Task, Config, [Maybe Fd]) -> Int -> TMVar Event -> Maybe ProcessID -> IO (Maybe ProcessID)
-loop state@(wants, t, cfg, fds) restarts mvar mpid = do
+loop :: (Task, Config, [Maybe Fd]) -> Int -> TMVar Event -> Want -> Maybe ProcessID -> IO (Maybe ProcessID)
+loop state@(t, cfg, fds) restarts mvar wants mpid = do
     e <- atomically $ orElse (takeTMVar mvar)
-                             (takeTMVar (tWakeup t) >> return Wakeup)
-    w <- atomically $ (readTMVar wants)
+                             (takeTMVar (tWant t) >>= return . Transition)
 
-    case decide e cfg w mpid restarts of
-        Start         -> start >>= awaitPid
-        Restart       -> restartDelay >> start >>= loop state (restarts + 1) mvar
-        Ignore        -> awaitPid Nothing
-        Terminate pid -> Sig.signalProcess Sig.sigTERM pid >> awaitPid Nothing
+    let wants' = case e of Transition w -> w
+                           _            -> wants
+
+    case decide e cfg wants mpid restarts of
+        Start         -> start >>= awaitPid wants'
+        Restart       -> restartDelay >> start >>= loop state (restarts + 1) mvar wants'
+        Ignore        -> awaitPid wants' Nothing
+        Terminate pid -> Sig.signalProcess Sig.sigTERM pid >> awaitPid wants' Nothing
 
     where
         start         = spawnProcess t fds mvar >>= return . Just
@@ -153,10 +155,12 @@ decide (Exit (Just _)) cfg w _ restarts = failWith w (maxRe cfg)
         failWith Up (Just m) | restarts < m = Restart
         failWith Up   _                     = Ignore
         failWith Down _                     = Ignore
-decide Wakeup _ Up   Nothing    _ = Start
-decide Wakeup _ Up   (Just _)   _ = Ignore
-decide Wakeup _ Down (Just pid) _ = Terminate pid
-decide Wakeup _ Down Nothing    _ = Ignore
+
+decide (Transition b)    _ a _          _ | a == b = Ignore
+decide (Transition Up)   _ _ Nothing    _          = Start
+decide (Transition Up)   _ _ (Just _)   _          = Ignore
+decide (Transition Down) _ _ (Just pid) _          = Terminate pid
+decide (Transition Down) _ _ Nothing    _          = Ignore
 
 spawnProcess :: Task -> [Maybe Fd] -> TMVar Event -> IO ProcessID
 spawnProcess t fds mvar = do
@@ -202,31 +206,31 @@ getCmd = do
         (_, _, msgs) ->
             error $ head msgs
 
-handleReq :: (Task, Task) -> Config -> TMVar Want -> String -> IO String
+handleReq :: (Task, Task) -> Config -> MVar Want -> String -> IO String
 handleReq _ _ _ [] = return "NOP"
 handleReq (inTask, outTask) cfg wants line =
     case head line of
-        's' -> fmap (map toLower . show) (atomically $ readTMVar wants)
-        'u' -> atomically (swapTMVar wants Up   >> wakeTask inTask) >> return ok
-        'd' -> atomically (swapTMVar wants Down >> wakeTask inTask) >> return ok
-        'x' -> atomically (swapTMVar wants Down >> mapM wakeTask [inTask, outTask]) >> exitSuccess
+        's' -> fmap (map toLower . show) (readMVar wants)
+        'u' -> atomically (mapM (transition Up) [outTask, inTask]) >> (swapMVar wants Up) >> return ok
+        'd' -> atomically (transition Down inTask) >> (swapMVar wants Down) >> return ok
+        'x' -> atomically (mapM (transition Down) [inTask, outTask]) >> exitSuccess
         'i' -> return $ fromMaybe "n/a" (ident cfg)
         ___ -> return $ err (" unknown command '" ++ line ++ "'")
     where
         ok            = "OK"
         err m         = "ERROR" ++ m
 
-recvTCP :: (Task, Task) -> Config -> Handle -> TMVar Want -> IO a
+recvTCP :: (Task, Task) -> Config -> Handle -> MVar Want -> IO a
 recvTCP tasks cfg handle w = forever $ do
     hGetLine handle >>= handleReq tasks cfg w >>= hPutStrLn handle
 
-acceptTCP :: (Task, Task) -> Config -> Net.Socket -> TMVar Want -> IO a
+acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
 acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
     forkIO $ recvTCP tasks cfg handle w
 
-maybeListenTCP :: (Task, Task) -> Config -> TMVar Want -> IO (Maybe Net.Socket)
+maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg wants =
     case (port cfg) of
         Just p -> do
@@ -242,10 +246,10 @@ closeMaybeSock (Just sock) =
 closeMaybeSock _ =
     return ()
 
-fork :: Task -> TMVar Want ->  Config -> [Maybe Fd] -> IO (MVar ())
-fork task wants cfg fds = do
+fork :: Task -> Config -> [Maybe Fd] -> IO (MVar ())
+fork task cfg fds = do
     done <- newEmptyMVar
-    forkFinally (spawn task wants cfg fds) (\_ -> putMVar done ())
+    forkFinally (spawn task cfg fds) (\_ -> putMVar done ())
     return done
 
 main :: IO ()
@@ -256,20 +260,20 @@ main =
         execute (cfg, n) | version cfg = putStrLn (unwords [n, "version", versionString])  >> exitSuccess
         execute (cfg, n) | help    cfg = putStrLn (helpString n) >> exitSuccess
         execute (cfg, _) = do
-            wants <- newTMVarIO (want cfg)
+            wants <- newMVar (want cfg)
 
             Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
             Sig.blockSignals $ Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
 
             (readfd, writefd) <- createPipe
 
-            outTask <- mkTask cfg outCmd outArgs
-            inTask  <- mkTask cfg inCmd inArgs
+            outTask <- mkTask cfg outCmd outArgs (want cfg)
+            inTask  <- mkTask cfg inCmd inArgs (want cfg)
 
             maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
 
-            outDone <- fork outTask wants cfg [Just readfd, Nothing, Nothing]
-            inDone  <- fork inTask  wants cfg [Nothing, Just writefd, Just writefd]
+            outDone <- fork outTask cfg [Just readfd, Nothing, Nothing]
+            inDone  <- fork inTask  cfg [Nothing, Just writefd, Just writefd]
 
             takeMVar inDone >> takeMVar outDone
 
