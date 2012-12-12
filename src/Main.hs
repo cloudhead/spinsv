@@ -109,9 +109,9 @@ options =
     , Option [] ["id"]
         (ReqArg (\o cfg -> cfg{ident = Just $ o})               "<id>") "bind to an identifier (optional)"
     , Option [] ["restart-delay"]
-        (ReqArg (\o cfg -> cfg{delay = read o})              "<delay>") "restart delay in milliseconds (1000)"
+        (ReqArg (\o cfg -> cfg{delay = read o})                 "<ms>") "restart delay in milliseconds (1000)"
     , Option [] ["max-restarts"]
-        (ReqArg (\o cfg -> cfg{maxRe = Just $ read o})         "<num>") "max number of restarts on failure (optional)"
+        (ReqArg (\o cfg -> cfg{maxRe = Just $ read o})         "<num>") "max number of service restarts (optional)"
     , Option [] ["dir"]
         (ReqArg (\o cfg -> cfg{dir = o})                      "<dir>")  "directory to run in (.)"
     , Option [] ["down"]
