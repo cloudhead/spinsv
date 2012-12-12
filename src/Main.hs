@@ -36,7 +36,6 @@ data Config = Config
     , ident   :: Maybe String
     , dir     :: String
     , want    :: Want
-    , onExit  :: Maybe Int
     , help    :: Bool
     , version :: Bool
     } deriving Show
@@ -72,7 +71,6 @@ defaultConfig = Config
     , ident   = Nothing
     , dir     = "."
     , want    = Up
-    , onExit  = Nothing
     , help    = False
     , version = False
     }
@@ -102,8 +100,6 @@ options =
         (ReqArg (\o cfg -> cfg{ident = Just $ o})               "<id>") "bind to an identifier (optional)"
     , Option [] ["restart-delay"]
         (ReqArg (\o cfg -> cfg{delay = read o})              "<delay>") "restart delay in milliseconds (1000)"
---  , Option [] ["on-exit"]
---      (ReqArg (\o cfg -> cfg{onExit = Just $ read o})     "<signal>") "send <signal> to output on input exit (IGNORED)"
     , Option [] ["dir"]
         (ReqArg (\o cfg -> cfg{dir = o})                      "<dir>")  "directory to run in (.)"
     , Option [] ["down"]
