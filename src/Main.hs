@@ -74,7 +74,7 @@ defaultConfig = Config
 
 helpString :: String -> String
 helpString prog =
-    usageInfo header options 
+    usageInfo header options
     where
         header = unlines [ concat [ "usage: ", prog, " [<option>...]"]
                          ,"\nstart and monitor a service and its appendant log service\n"
@@ -82,7 +82,7 @@ helpString prog =
                          ]
 
 options :: [OptDescr (Config -> Config)]
-options = 
+options =
     [ Option [] ["in.cmd"]
         (ReqArg (\o cfg -> cfg{inCmd = o})                    "<cmd>")  "input command (tee)"
     , Option [] ["out.cmd"]
