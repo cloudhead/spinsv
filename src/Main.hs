@@ -156,7 +156,7 @@ decide (Exit (Just _)) cfg w _ restarts = failWith w (maxRe cfg)
         failWith Up   _                     = Ignore
         failWith Down _                     = Ignore
 
-decide (Transition b)    _ a _          _ | a == b = Ignore
+decide (Transition b)    _ a (Just _)   _ | a == b = Ignore
 decide (Transition Up)   _ _ Nothing    _          = Start
 decide (Transition Up)   _ _ (Just _)   _          = Ignore
 decide (Transition Down) _ _ (Just pid) _          = Terminate pid
