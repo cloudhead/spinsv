@@ -28,4 +28,5 @@ executable spinsv
                     , unix
                     , process
                     , stm
+                    , async
                     , network

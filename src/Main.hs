@@ -14,6 +14,7 @@ import System.Environment
 import System.Console.GetOpt
 import Control.Concurrent.STM
 import Control.Concurrent
+import Control.Concurrent.Async
 import System.IO
 import Control.Exception.Base hiding (handle)
 import Data.Char
@@ -246,12 +247,6 @@ closeMaybeSock (Just sock) =
 closeMaybeSock _ =
     return ()
 
-fork :: Task -> Config -> [Maybe Fd] -> IO (MVar ())
-fork task cfg fds = do
-    done <- newEmptyMVar
-    forkFinally (spawn task cfg fds) (\_ -> putMVar done ())
-    return done
-
 main :: IO ()
 main =
     getCmd >>= execute
@@ -272,10 +267,11 @@ main =
 
             maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
 
-            outDone <- fork outTask cfg [Just readfd, Nothing, Nothing]
-            inDone  <- fork inTask  cfg [Nothing, Just writefd, Just writefd]
+            outDone <- async $ spawn outTask cfg [Just readfd, Nothing, Nothing]
+            inDone  <- async $ spawn inTask  cfg [Nothing, Just writefd, Just writefd]
 
-            takeMVar inDone >> takeMVar outDone
+            wait outDone
+            wait inDone
 
             closeMaybeSock maybeSock
 
