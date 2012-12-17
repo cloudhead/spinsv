@@ -236,7 +236,7 @@ acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
 acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO $ recvTCP tasks cfg handle w `catch` ((\_ -> return ()) :: UserQuit -> IO ())
+    forkIO $ recvTCP tasks cfg handle w `catch` ((\_ -> hClose handle) :: UserQuit -> IO ())
 
 maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg wants =
