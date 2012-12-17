@@ -1,6 +1,7 @@
+{-# LANGUAGE DeriveDataTypeable #-}
+
 module Main where
 --
--- TODO check 'async' module
 -- TODO use `IO Either` as return type when it makes sense
 -- TODO handle ^C properly on tcp connection
 --
@@ -20,6 +21,7 @@ import Control.Exception.Base hiding (handle)
 import Data.Char
 import Data.Maybe
 import Control.Monad
+import Data.Typeable
 
 import qualified System.Posix.Signals as Sig
 import qualified Network              as Net
@@ -44,16 +46,16 @@ data Config = Config
     } deriving Show
 
 data Task = Task
-    { tCmd  :: Cmd
-    , tWant :: TMVar Want
+    { tCmd      :: Cmd
+    , tWant     :: TMVar Want
+    , tRestarts :: TMVar Int
     }
 
-data Event = Exit (Maybe ProcessStatus) | Transition Want
+data UserQuit = UserQuit deriving (Show, Typeable)
+instance Exception UserQuit
 
-data Action = Start
-            | Restart
-            | Ignore
-            | Terminate ProcessID
+data UserKill = UserKill deriving (Show, Typeable)
+instance Exception UserKill
 
 versionString :: String
 versionString = "0.0.0"
@@ -61,10 +63,19 @@ versionString = "0.0.0"
 tee :: String
 tee = "tee"
 
+prompt :: String
+prompt = "> "
+
 mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
 mkTask cfg cmdf argsf w = do
-    wants <- newTMVarIO w
-    return Task{tCmd = (cmdf cfg, argsf cfg), tWant = wants}
+    wants    <- newTMVarIO w
+    restarts <- newTMVarIO 0
+
+    return Task
+        { tCmd      = (cmdf cfg, argsf cfg)
+        , tWant     = wants
+        , tRestarts = restarts
+        }
 
 transition :: Want -> Task -> STM ()
 transition w t =
@@ -125,74 +136,60 @@ options =
 
 spawn :: Task -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
 spawn t cfg fds =
-    changeWorkingDirectory (dir cfg) >> newEmptyTMVarIO >>= \mvar ->
-        loop (t, cfg, fds) 0 mvar (want cfg) Nothing
+    changeWorkingDirectory (dir cfg) >> loop (t, cfg, fds)
 
-loop :: (Task, Config, [Maybe Fd]) -> Int -> TMVar Event -> Want -> Maybe ProcessID -> IO (Maybe ProcessID)
-loop state@(t, cfg, fds) restarts mvar wants mpid = do
-    e <- atomically $ orElse (takeTMVar mvar)
-                             (takeTMVar (tWant t) >>= return . Transition)
+waitWant :: Want -> TMVar Want -> STM Want
+waitWant w var = do
+    v <- takeTMVar var
 
-    let wants' = case e of Transition w -> w
-                           _            -> wants
+    if v == w then return v
+    else           waitWant w var
 
-    case decide e cfg wants mpid restarts of
-        Start         -> start >>= awaitPid wants'
-        Restart       -> restartDelay >> start >>= loop state (restarts + 1) mvar wants'
-        Ignore        -> awaitPid wants' Nothing
-        Terminate pid -> Sig.signalProcess Sig.sigTERM pid >> awaitPid wants' Nothing
+loop :: (Task, Config, [Maybe Fd]) -> IO (Maybe ProcessID)
+loop s@(t, cfg, fds) = do
+    w <- atomically $ takeTMVar (tWant t)
 
-    where
-        start         = spawnProcess t fds mvar >>= return . Just
-        awaitPid      = loop state restarts mvar
-        restartDelay  = threadDelay $ 1000 * (delay cfg)
+    when (w == Up) $ do
+        pid <- forkProcess $ child (tCmd t) fds
 
-decide :: Event -> Config -> Want -> (Maybe ProcessID) -> Int -> Action
-decide (Exit Nothing)                     _ _ _ _ = Ignore
-decide (Exit (Just (Exited ExitSuccess))) _ _ _ _ = Ignore
-decide (Exit (Just _)) cfg w _ restarts = failWith w (maxRe cfg)
-    where
-        failWith Up Nothing                 = Restart
-        failWith Up (Just m) | restarts < m = Restart
-        failWith Up   _                     = Ignore
-        failWith Down _                     = Ignore
+        -- Normally, we would close the pipe descriptors (`fds`) here,
+        -- but we need to be able to pass them to subsequent child processes
+        -- as they are restarted on failure, so we leave them open.
 
-decide (Transition b)    _ a (Just _)   _ | a == b = Ignore
-decide (Transition Up)   _ _ Nothing    _          = Start
-decide (Transition Up)   _ _ (Just _)   _          = Ignore
-decide (Transition Down) _ _ (Just pid) _          = Terminate pid
-decide (Transition Down) _ _ Nothing    _          = Ignore
+        exit <- async $ getProcessStatus True False pid
 
-spawnProcess :: Task -> [Maybe Fd] -> TMVar Event -> IO ProcessID
-spawnProcess t fds mvar = do
-    pid <- forkProcess $ child fds
-
-    -- Normally, we would close the pipe descriptors (`fds`) here,
-    -- but we need to be able to pass them to subsequent child processes
-    -- as they are restarted on failure, so we leave them open.
-
-    forkIO $ waitForExit pid mvar
-
-    return pid
+        decide pid =<< (atomically $ orElse (waitSTM  exit           >>= return . Left)
+                                            (waitWant Down (tWant t) >>= return . Right))
+    loop s
 
     where
-        child :: [Maybe Fd] -> IO ()
-        child fds' = do
-            sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
-                    ++ map closeFd' (catMaybes fds')
+        decide _ (Left (Just (Exited ExitSuccess))) = return ()
+        decide _ (Left (Just _)) = do
+            r <- atomically $ takeTMVar (tRestarts t)
 
-            executeFile cmd True args Nothing
+            case maxRe cfg of
+                Nothing        -> restart r
+                Just m | r < m -> restart r
+                _              -> return ()
 
-            where
-                (cmd, args)            = tCmd t
-                maybeDup (Just fd) std = dupTo fd std >> return ()
-                maybeDup Nothing   _   = return ()
-                closeFd' fd            = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
+        decide _   (Left Nothing) = return ()
+        decide pid (Right _)      = Sig.signalProcess Sig.sigTERM pid
 
-        waitForExit :: ProcessID -> TMVar Event -> IO ()
-        waitForExit pid m = do
-            ps <- getProcessStatus True False pid
-            atomically $ putTMVar m (Exit ps)
+        restart r = do
+            atomically  $ transition Up t >> putTMVar (tRestarts t) (r + 1)
+            threadDelay $ 1000 * (delay cfg)
+
+child :: Cmd -> [Maybe Fd] -> IO ()
+child (cmd, args) fds' = do
+    sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
+            ++ map closeFd' (catMaybes fds')
+
+    executeFile cmd True args Nothing
+
+    where
+        maybeDup (Just fd) std = dupTo fd std >> return ()
+        maybeDup Nothing   _   = return ()
+        closeFd' fd            = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
 
 getCmd :: IO (Config, String)
 getCmd = do
@@ -208,28 +205,38 @@ getCmd = do
             error $ head msgs
 
 handleReq :: (Task, Task) -> Config -> MVar Want -> String -> IO String
-handleReq _ _ _ [] = return "NOP"
+handleReq t c w [] = handleReq t c w "help"
 handleReq (inTask, outTask) cfg wants line =
-    case head line of
-        's' -> fmap (map toLower . show) (readMVar wants)
-        'u' -> atomically (mapM (transition Up) [outTask, inTask]) >> (swapMVar wants Up) >> return ok
-        'd' -> atomically (transition Down inTask) >> (swapMVar wants Down) >> return ok
-        'x' -> atomically (mapM (transition Down) [inTask, outTask]) >> exitSuccess
-        'i' -> return $ fromMaybe "n/a" (ident cfg)
-        ___ -> return $ err (" unknown command '" ++ line ++ "'")
+    case line of
+        "status" -> status
+        "config" -> return $ show cfg
+        "up"     -> atomically (transition Up inTask) >> (swapMVar wants Up) >> return ok
+        "down"   -> atomically (transition Down inTask) >> (swapMVar wants Down) >> return ok
+        "kill"   -> atomically (mapM (transition Down) [inTask, outTask]) >> throwIO UserKill
+        "id"     -> return $ fromMaybe "n/a" (ident cfg)
+        "help"   -> return help'
+        "q"      -> throwIO UserQuit
+        ____     -> return $ err (" unknown command '" ++ line ++ "'")
     where
-        ok            = "OK"
-        err m         = "ERROR" ++ m
+        ok     = "OK"
+        err m  = "ERR" ++ m
+        help'  = "status, up, down, id, kill, help, q"
+        status = do
+            w  <- readMVar wants
+            rs <- atomically $ sequence [ readTMVar (tRestarts inTask)
+                                        , readTMVar (tRestarts outTask) ]
+
+            return $ unwords $ [(map toLower . show) w] ++ (map show rs)
 
 recvTCP :: (Task, Task) -> Config -> Handle -> MVar Want -> IO a
-recvTCP tasks cfg handle w = forever $ do
-    hGetLine handle >>= handleReq tasks cfg w >>= hPutStrLn handle
+recvTCP tasks cfg h w = forever $ do
+    hPutStr h prompt >> hGetLine h >>= handleReq tasks cfg w >>= hPutStrLn h
 
 acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
 acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO $ recvTCP tasks cfg handle w
+    forkIO $ recvTCP tasks cfg handle w `catch` ((\_ -> return ()) :: UserQuit -> IO ())
 
 maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg wants =
@@ -252,7 +259,7 @@ main =
     getCmd >>= execute
 
     where
-        execute (cfg, n) | version cfg = putStrLn (unwords [n, "version", versionString])  >> exitSuccess
+        execute (cfg, n) | version cfg = putStrLn (unwords [n, "version", versionString]) >> exitSuccess
         execute (cfg, n) | help    cfg = putStrLn (helpString n) >> exitSuccess
         execute (cfg, _) = do
             wants <- newMVar (want cfg)
@@ -262,16 +269,13 @@ main =
 
             (readfd, writefd) <- createPipe
 
-            outTask <- mkTask cfg outCmd outArgs (want cfg)
+            outTask <- mkTask cfg outCmd outArgs Up
             inTask  <- mkTask cfg inCmd inArgs (want cfg)
 
             maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
 
-            outDone <- async $ spawn outTask cfg [Just readfd, Nothing, Nothing]
-            inDone  <- async $ spawn inTask  cfg [Nothing, Just writefd, Just writefd]
-
-            wait outDone
-            wait inDone
+            concurrently (spawn outTask cfg [Just readfd, Nothing, Nothing])
+                         (spawn inTask  cfg [Nothing, Just writefd, Just writefd])
 
             closeMaybeSock maybeSock
 
