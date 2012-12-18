@@ -228,15 +228,15 @@ handleReq (inTask, outTask) cfg wants line =
 
             return $ unwords $ [(map toLower . show) w] ++ (map show rs)
 
-recvTCP :: (Task, Task) -> Config -> Handle -> MVar Want -> IO a
-recvTCP tasks cfg h w = forever $ do
+recvTCP :: (Task, Task) -> Config -> Handle -> MVar Want -> IO ()
+recvTCP tasks cfg h w =
     hPutStr h prompt >> hGetLine h >>= handleReq tasks cfg w >>= hPutStrLn h
 
 acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
 acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO $ recvTCP tasks cfg handle w `catch` ((\_ -> hClose handle) :: UserQuit -> IO ())
+    forkIO $ (forever $ recvTCP tasks cfg handle w) `catch` ((\_ -> hClose handle) :: UserQuit -> IO ())
 
 maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg wants =
