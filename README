@@ -1,17 +1,46 @@
 
-= spinsv
+  SPINSV
 
-  A service runner inspired by runsv.
+    A service runner inspired by runsv.
 
-* building
+. background
+
+  A common need encountered when running services on a unix system is
+  to pipe the output of one service into the input of another, (often
+  a log service such as `svlogd`). This looks something like this:
+
+      #!/bin/sh
+
+      service | log-service
+
+  There are several problems with this approach, however:
+
+    * There is no monitoring: if either of the services die,
+      they aren't restarted.
+    * It's hard to inspect the state of the process pair,
+      especially if it goes down.
+    * Even if the script is restarted when either of the services
+      fails, this means the log service will cause a restart of the
+      other service if it dies.
+    * There is no single entry point to managing the process pair.
+
+. rationale
+
+  To have a completely stateless[1] service runner configurable via
+  the command line.
+
+  1. spinsv doesn't need file system access for configuration
+     or operation.
+
+. building
 
   $ make
 
-* running
+. running
 
   See 'spinsv --help'
 
-* copyright
+. copyright
 
   (C) 2012 Alexis Sellier <alexis@cloudhead.io>
 
