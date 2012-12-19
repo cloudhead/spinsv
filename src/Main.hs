@@ -136,7 +136,22 @@ options =
 
 spawn :: Task -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
 spawn t cfg fds =
-    changeWorkingDirectory (dir cfg) >> loop (t, cfg, fds)
+    changeWorkingDirectory (dir cfg) >> loop (t, cfg) start
+
+    where
+        start = do
+            pid <- forkProcess $ child (tCmd t) fds
+
+            -- Normally, we would close the pipe descriptors (`fds`) here,
+            -- but we need to be able to pass them to subsequent child processes
+            -- as they are restarted on failure, so we leave them open.
+
+            status <- async $ waitp pid
+            return (waitSTM status, stop pid)
+
+        waitp = getProcessStatus True False
+        stop  = Sig.signalProcess Sig.sigTERM
+
 
 waitWant :: Want -> TMVar Want -> STM Want
 waitWant w var = do
@@ -145,38 +160,34 @@ waitWant w var = do
     if v == w then return v
     else           waitWant w var
 
-loop :: (Task, Config, [Maybe Fd]) -> IO (Maybe ProcessID)
-loop s@(t, cfg, fds) = do
+loop :: (Task, Config) -> IO (STM (Maybe ProcessStatus), IO ()) -> IO b
+loop s@(t, cfg) start = do
     w <- atomically $ takeTMVar (tWant t)
 
     when (w == Up) $ do
-        pid <- forkProcess $ child (tCmd t) fds
+        (waitExit, stop) <- start
 
-        -- Normally, we would close the pipe descriptors (`fds`) here,
-        -- but we need to be able to pass them to subsequent child processes
-        -- as they are restarted on failure, so we leave them open.
+        e <- atomically $ orElse (waitExit                >>= return . Left)
+                                 (waitWant Down (tWant t) >>= return . Right)
 
-        exit <- async $ getProcessStatus True False pid
+        case e of
+            Left (Just (Exited ExitSuccess)) -> return ()
+            Left (Just _) -> do
+                n <- atomically $ takeTMVar (tRestarts t)
 
-        decide pid =<< (atomically $ orElse (waitSTM  exit           >>= return . Left)
-                                            (waitWant Down (tWant t) >>= return . Right))
-    loop s
+                case maxRe cfg of
+                    Nothing        -> restart n
+                    Just m | n < m -> restart n
+                    _              -> return ()
+
+            Left Nothing -> return ()
+            Right _      -> stop
+
+    loop s start
 
     where
-        decide _ (Left (Just (Exited ExitSuccess))) = return ()
-        decide _ (Left (Just _)) = do
-            r <- atomically $ takeTMVar (tRestarts t)
-
-            case maxRe cfg of
-                Nothing        -> restart r
-                Just m | r < m -> restart r
-                _              -> return ()
-
-        decide _   (Left Nothing) = return ()
-        decide pid (Right _)      = Sig.signalProcess Sig.sigTERM pid
-
-        restart r = do
-            atomically  $ transition Up t >> putTMVar (tRestarts t) (r + 1)
+        restart n = do
+            atomically  $ transition Up t >> putTMVar (tRestarts t) (n + 1)
             threadDelay $ 1000 * (delay cfg)
 
 child :: Cmd -> [Maybe Fd] -> IO ()
@@ -254,6 +265,25 @@ closeMaybeSock (Just sock) =
 closeMaybeSock _ =
     return ()
 
+run :: Config -> IO ()
+run cfg = do
+    wants <- newMVar (want cfg)
+
+    Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
+    Sig.blockSignals $ Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
+
+    (readfd, writefd) <- createPipe
+
+    outTask <- mkTask cfg outCmd outArgs Up
+    inTask  <- mkTask cfg inCmd inArgs (want cfg)
+
+    maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
+
+    concurrently (spawn outTask cfg [Just readfd, Nothing, Nothing])
+                 (spawn inTask  cfg [Nothing, Just writefd, Just writefd])
+
+    closeMaybeSock maybeSock
+
 main :: IO ()
 main =
     getCmd >>= execute
@@ -261,21 +291,5 @@ main =
     where
         execute (cfg, n) | version cfg = putStrLn (unwords [n, "version", versionString]) >> exitSuccess
         execute (cfg, n) | help    cfg = putStrLn (helpString n) >> exitSuccess
-        execute (cfg, _) = do
-            wants <- newMVar (want cfg)
-
-            Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
-            Sig.blockSignals $ Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
-
-            (readfd, writefd) <- createPipe
-
-            outTask <- mkTask cfg outCmd outArgs Up
-            inTask  <- mkTask cfg inCmd inArgs (want cfg)
-
-            maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
-
-            concurrently (spawn outTask cfg [Just readfd, Nothing, Nothing])
-                         (spawn inTask  cfg [Nothing, Just writefd, Just writefd])
-
-            closeMaybeSock maybeSock
+        execute (cfg, _)               = run cfg
 
