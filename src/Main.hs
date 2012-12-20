@@ -152,34 +152,31 @@ spawn t cfg fds =
         stop     = Sig.signalProcess Sig.sigTERM
 
 
-waitWant :: Want -> TMVar Want -> IO Want
+waitWant :: Want -> TMVar Want -> IO ()
 waitWant w var = do
     v <- atomically $ takeTMVar var
 
-    if v == w then return v
+    if v == w then return ()
     else           waitWant w var
 
 loop :: (Task, Config) -> IO (IO (Maybe ProcessStatus), IO ()) -> IO b
 loop s@(t, cfg) start = do
-    w <- atomically $ takeTMVar (tWant t)
+    waitWant Up (tWant t)
+    (waitExit, stop) <- start
+    e <- race waitExit (waitWant Down (tWant t))
 
-    when (w == Up) $ do
-        (waitExit, stop) <- start
+    case e of
+        Left (Just (Exited ExitSuccess)) -> return ()
+        Left (Just _) -> do
+            n <- atomically $ takeTMVar (tRestarts t)
 
-        e <- race waitExit (waitWant Down (tWant t))
+            case maxRe cfg of
+                Nothing        -> restart n
+                Just m | n < m -> restart n
+                _              -> return ()
 
-        case e of
-            Left (Just (Exited ExitSuccess)) -> return ()
-            Left (Just _) -> do
-                n <- atomically $ takeTMVar (tRestarts t)
-
-                case maxRe cfg of
-                    Nothing        -> restart n
-                    Just m | n < m -> restart n
-                    _              -> return ()
-
-            Left Nothing -> return ()
-            Right _      -> stop
+        Left Nothing -> return ()
+        Right _      -> stop
 
     loop s start
 
