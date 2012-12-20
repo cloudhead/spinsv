@@ -146,29 +146,27 @@ spawn t cfg fds =
             -- but we need to be able to pass them to subsequent child processes
             -- as they are restarted on failure, so we leave them open.
 
-            status <- async $ waitp pid
-            return (waitSTM status, stop pid)
+            return (status pid, stop pid)
 
-        waitp = getProcessStatus True False
-        stop  = Sig.signalProcess Sig.sigTERM
+        status p = wait =<< async (getProcessStatus True True p)
+        stop     = Sig.signalProcess Sig.sigTERM
 
 
-waitWant :: Want -> TMVar Want -> STM Want
+waitWant :: Want -> TMVar Want -> IO Want
 waitWant w var = do
-    v <- takeTMVar var
+    v <- atomically $ takeTMVar var
 
     if v == w then return v
     else           waitWant w var
 
-loop :: (Task, Config) -> IO (STM (Maybe ProcessStatus), IO ()) -> IO b
+loop :: (Task, Config) -> IO (IO (Maybe ProcessStatus), IO ()) -> IO b
 loop s@(t, cfg) start = do
     w <- atomically $ takeTMVar (tWant t)
 
     when (w == Up) $ do
         (waitExit, stop) <- start
 
-        e <- atomically $ orElse (waitExit                >>= return . Left)
-                                 (waitWant Down (tWant t) >>= return . Right)
+        e <- race waitExit (waitWant Down (tWant t))
 
         case e of
             Left (Just (Exited ExitSuccess)) -> return ()
