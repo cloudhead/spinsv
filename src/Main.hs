@@ -66,8 +66,11 @@ tee = "tee"
 prompt :: String
 prompt = "> "
 
-mkTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
-mkTask cfg cmdf argsf w = do
+forkDelay :: Int
+forkDelay = 1000 * 100
+
+newTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
+newTask cfg cmdf argsf w = do
     wants    <- newTMVarIO w
     restarts <- newTMVarIO 0
 
@@ -134,9 +137,10 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-spawn :: Task -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
-spawn t cfg fds =
-    changeWorkingDirectory (dir cfg) >> loop (t, cfg) start
+spawn :: Task -> Config -> IO () -> [Maybe Fd] -> IO (Maybe ProcessID)
+spawn t cfg ready fds =
+
+    ready >> loop (t, cfg) start
 
     where
         start = do
@@ -162,11 +166,13 @@ waitWant w var = do
 loop :: (Task, Config) -> IO (IO (Maybe ProcessStatus), IO ()) -> IO b
 loop s@(t, cfg) start = do
     waitWant Up (tWant t)
+
     (waitExit, stop) <- start
+
     e <- race waitExit (waitWant Down (tWant t))
 
     case e of
-        Left (Just (Exited ExitSuccess)) -> return ()
+        Left (Just (Exited ExitSuccess)) -> exitSuccess
         Left (Just _) -> do
             n <- atomically $ takeTMVar (tRestarts t)
 
@@ -270,15 +276,21 @@ run cfg = do
 
     (readfd, writefd) <- createPipe
 
-    outTask <- mkTask cfg outCmd outArgs Up
-    inTask  <- mkTask cfg inCmd inArgs (want cfg)
+    outTask <- newTask cfg outCmd outArgs Up
+    inTask  <- newTask cfg inCmd inArgs (want cfg)
 
     maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
 
-    concurrently (spawn outTask cfg [Just readfd, Nothing, Nothing])
-                 (spawn inTask  cfg [Nothing, Just writefd, Just writefd])
+    changeWorkingDirectory (dir cfg)
+
+    concurrently (spawn outTask cfg outReady [Just readfd, Nothing, Nothing])
+                 (spawn inTask  cfg inReady  [Nothing, Just writefd, Just writefd])
 
     closeMaybeSock maybeSock
+
+    where
+        inReady  = threadDelay forkDelay
+        outReady = return ()
 
 main :: IO ()
 main =
