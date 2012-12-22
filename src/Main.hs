@@ -150,7 +150,7 @@ options =
 spawn :: Task -> Config -> IO () -> [Maybe Fd] -> IO (Maybe ProcessID)
 spawn t cfg ready fds =
 
-    ready >> loop (t, cfg) start
+    loop (t, cfg) ready start
 
     where
         start = do
@@ -173,8 +173,8 @@ waitWant w var = do
     if v == w then return ()
     else           waitWant w var
 
-loop :: (Task, Config) -> IO (IO ProcessStatus, IO ()) -> IO b
-loop (t, cfg) start = forever $ do
+loop :: (Task, Config) -> IO () -> IO (IO ProcessStatus, IO ()) -> IO b
+loop (t, cfg) ready start = forever $ ready >> do
     waitWant Up (tWant t)
 
     (waitExit, stop) <- start
