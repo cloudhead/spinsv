@@ -174,7 +174,7 @@ waitWant w var = do
     else           waitWant w var
 
 loop :: (Task, Config) -> IO (IO ProcessStatus, IO ()) -> IO b
-loop s@(t, cfg) start = do
+loop (t, cfg) start = forever $ do
     waitWant Up (tWant t)
 
     (waitExit, stop) <- start
@@ -192,8 +192,6 @@ loop s@(t, cfg) start = do
                 _              -> return ()
 
         Right _  -> stop
-
-    loop s start
 
     where
         restart n = do
