@@ -94,6 +94,14 @@ transition :: Want -> Task -> STM ()
 transition w t =
     putTMVar (tWant t) w
 
+getTaskRestarts :: Task -> STM Int
+getTaskRestarts t =
+    takeTMVar (tRestarts t)
+
+setTaskRestarts :: Task -> Int -> STM ()
+setTaskRestarts t n =
+    putTMVar (tRestarts t) n
+
 defaultConfig :: Config
 defaultConfig = Config
     { inCmd   = tee
@@ -184,7 +192,7 @@ loop (t, cfg) ready start = forever $ ready >> do
     case e of
         Left (Exited ExitSuccess) -> exitSuccess
         Left _ -> do
-            n <- atomically $ takeTMVar (tRestarts t)
+            n <- atomically $ getTaskRestarts t
 
             case maxRe cfg of
                 Nothing        -> restart n
@@ -196,7 +204,7 @@ loop (t, cfg) ready start = forever $ ready >> do
     where
         restart n = do
             sleep (delay cfg)
-            atomically  $ transition Up t >> putTMVar (tRestarts t) (n + 1)
+            atomically $ transition Up t >> setTaskRestarts t (n + 1)
 
 child :: Cmd -> [Maybe Fd] -> IO ()
 child (cmd, args) fds' = do
