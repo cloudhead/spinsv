@@ -69,6 +69,16 @@ prompt = "> "
 forkDelay :: Int
 forkDelay = 1000 * 100
 
+sleep :: Int -> IO ()
+sleep t = threadDelay $ 1000 * 1000 * t
+
+pollIO :: IO (Maybe a) -> IO a
+pollIO io = do
+    a <- io
+    case a of
+        Nothing -> sleep 1 >> pollIO io
+        Just x  -> return x
+
 newTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
 newTask cfg cmdf argsf w = do
     wants    <- newTMVarIO w
@@ -152,8 +162,8 @@ spawn t cfg ready fds =
 
             return (status pid, stop pid)
 
-        status p = wait =<< async (getProcessStatus True True p)
-        stop     = Sig.signalProcess Sig.sigTERM
+        status = pollIO . getProcessStatus False True
+        stop   = Sig.signalProcess Sig.sigTERM
 
 
 waitWant :: Want -> TMVar Want -> IO ()
@@ -163,7 +173,7 @@ waitWant w var = do
     if v == w then return ()
     else           waitWant w var
 
-loop :: (Task, Config) -> IO (IO (Maybe ProcessStatus), IO ()) -> IO b
+loop :: (Task, Config) -> IO (IO ProcessStatus, IO ()) -> IO b
 loop s@(t, cfg) start = do
     waitWant Up (tWant t)
 
@@ -172,8 +182,8 @@ loop s@(t, cfg) start = do
     e <- race waitExit (waitWant Down (tWant t))
 
     case e of
-        Left (Just (Exited ExitSuccess)) -> exitSuccess
-        Left (Just _) -> do
+        Left (Exited ExitSuccess) -> exitSuccess
+        Left _ -> do
             n <- atomically $ takeTMVar (tRestarts t)
 
             case maxRe cfg of
@@ -181,15 +191,14 @@ loop s@(t, cfg) start = do
                 Just m | n < m -> restart n
                 _              -> return ()
 
-        Left Nothing -> return ()
-        Right _      -> stop
+        Right _  -> stop
 
     loop s start
 
     where
         restart n = do
+            sleep (delay cfg)
             atomically  $ transition Up t >> putTMVar (tRestarts t) (n + 1)
-            threadDelay $ 1000 * (delay cfg)
 
 child :: Cmd -> [Maybe Fd] -> IO ()
 child (cmd, args) fds' = do
