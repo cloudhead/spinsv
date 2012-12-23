@@ -99,8 +99,8 @@ getTaskRestarts t =
     takeTMVar (tRestarts t)
 
 setTaskRestarts :: Task -> Int -> STM ()
-setTaskRestarts t n =
-    putTMVar (tRestarts t) n
+setTaskRestarts t =
+    putTMVar (tRestarts t)
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -140,7 +140,7 @@ options =
     , Option [] ["port"]
         (ReqArg (\o cfg -> cfg{port = Just $ read o})         "<port>") "port to bind to (optional)"
     , Option [] ["id"]
-        (ReqArg (\o cfg -> cfg{ident = Just $ o})               "<id>") "bind to an identifier (optional)"
+        (ReqArg (\o cfg -> cfg{ident = Just o})                 "<id>") "bind to an identifier (optional)"
     , Option [] ["restart-delay"]
         (ReqArg (\o cfg -> cfg{delay = read o})                 "<ms>") "restart delay in milliseconds (1000)"
     , Option [] ["max-restarts"]
@@ -177,9 +177,7 @@ spawn t cfg ready fds =
 waitWant :: Want -> TMVar Want -> IO ()
 waitWant w var = do
     v <- atomically $ takeTMVar var
-
-    if v == w then return ()
-    else           waitWant w var
+    unless (v == w) $ waitWant w var
 
 loop :: (Task, Config) -> IO () -> IO (IO ProcessStatus, IO ()) -> IO b
 loop (t, cfg) ready start = forever $ ready >> do
@@ -208,13 +206,13 @@ loop (t, cfg) ready start = forever $ ready >> do
 
 child :: Cmd -> [Maybe Fd] -> IO ()
 child (cmd, args) fds' = do
-    sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
-            ++ map closeFd' (catMaybes fds')
+    _sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
+             ++ map closeFd' (catMaybes fds')
 
     executeFile cmd True args Nothing
 
     where
-        maybeDup (Just fd) std = dupTo fd std >> return ()
+        maybeDup (Just fd) std = void $ dupTo fd std
         maybeDup Nothing   _   = return ()
         closeFd' fd            = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
 
@@ -225,7 +223,7 @@ getCmd = do
 
     case getOpt RequireOrder options a of
         (flags, [], []) ->
-            return $ (foldl (\def t -> t def) defaultConfig flags, n)
+            return (foldl (\def t -> t def) defaultConfig flags, n)
         (_, nonOpts, []) ->
             error $ "unrecognized arguments: " ++ unwords nonOpts
         (_, _, msgs) ->
@@ -237,8 +235,8 @@ handleReq (inTask, outTask) cfg wants line =
     case line of
         "status" -> status
         "config" -> return $ show cfg
-        "up"     -> atomically (transition Up inTask) >> (swapMVar wants Up) >> return ok
-        "down"   -> atomically (transition Down inTask) >> (swapMVar wants Down) >> return ok
+        "up"     -> atomically (transition Up inTask) >> swapMVar wants Up >> return ok
+        "down"   -> atomically (transition Down inTask) >> swapMVar wants Down >> return ok
         "kill"   -> atomically (mapM (transition Down) [inTask, outTask]) >> throwIO UserKill
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
@@ -253,7 +251,7 @@ handleReq (inTask, outTask) cfg wants line =
             rs <- atomically $ sequence [ readTMVar (tRestarts inTask)
                                         , readTMVar (tRestarts outTask) ]
 
-            return $ unwords $ [(map toLower . show) w] ++ (map show rs)
+            return $ unwords $ (map toLower . show) w : map show rs
 
 recvTCP :: (Task, Task) -> Config -> Handle -> MVar Want -> IO ()
 recvTCP tasks cfg h w =
@@ -263,12 +261,12 @@ acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
 acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO $ (forever $ recvTCP tasks cfg handle w) `catch` ((\_ -> hClose handle) :: IOException -> IO ())
-                                                    `catch` ((\_ -> hClose handle) :: UserQuit -> IO ())
+    forkIO (forever $ recvTCP tasks cfg handle w) `catch` ((\_ -> hClose handle) :: IOException -> IO ())
+                                                  `catch` ((\_ -> hClose handle) :: UserQuit -> IO ())
 
 maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg wants =
-    case (port cfg) of
+    case port cfg of
         Just p -> do
             sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
             forkIO $ acceptTCP tasks cfg sock wants
