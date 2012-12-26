@@ -16,8 +16,8 @@ import System.Console.GetOpt
 import Control.Concurrent.STM
 import Control.Concurrent
 import Control.Concurrent.Async
+import Control.Exception hiding (handle)
 import System.IO
-import Control.Exception.Base hiding (handle)
 import Data.Char
 import Data.Maybe
 import Control.Monad
@@ -258,8 +258,10 @@ acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
 acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO (forever $ recvTCP tasks cfg handle w `catch` ((\_ -> hClose handle) :: IOException -> IO ())
-                                                 `catch` ((\_ -> hClose handle) :: UserQuit -> IO ()))
+    forkIO $ (forever $ recvTCP tasks cfg handle w)
+        `catches`
+            [ Handler ((\_ -> hClose handle) :: UserQuit -> IO ())
+            , Handler ((\_ -> hClose handle) :: IOException -> IO ()) ]
 
 maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg wants =
