@@ -27,6 +27,9 @@
       other service if it dies.
     * There is no single entry point to managing the process pair.
 
+  spinsv aims to solve these shortcomings by monitoring the processes
+  and providing a TCP console to access or change the process state.
+
 . rationale
 
   To have a completely stateless[1] service runner configurable via
