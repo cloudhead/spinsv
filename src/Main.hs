@@ -206,7 +206,7 @@ loop (t, cfg) ready start = forever $ ready >> do
 
 child :: Cmd -> [Maybe Fd] -> IO ()
 child (cmd, args) fds' = do
-    _sequence $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
+    sequence_ $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
              ++ map closeFd' (catMaybes fds')
 
     executeFile cmd True args Nothing
@@ -261,8 +261,8 @@ acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
 acceptTCP tasks cfg s w = forever $ do
     (handle, _, _) <- Net.accept s
     hSetBuffering handle NoBuffering
-    forkIO (forever $ recvTCP tasks cfg handle w) `catch` ((\_ -> hClose handle) :: IOException -> IO ())
-                                                  `catch` ((\_ -> hClose handle) :: UserQuit -> IO ())
+    forkIO (forever $ recvTCP tasks cfg handle w `catch` ((\_ -> hClose handle) :: IOException -> IO ())
+                                                 `catch` ((\_ -> hClose handle) :: UserQuit -> IO ()))
 
 maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg wants =
