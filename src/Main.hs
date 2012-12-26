@@ -73,7 +73,7 @@ pollIO :: IO (Maybe a) -> IO a
 pollIO io = do
     a <- io
     case a of
-        Nothing -> sleep 1 >> pollIO io
+        Nothing -> sleep 100 >> pollIO io
         Just x  -> return x
 
 newTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
