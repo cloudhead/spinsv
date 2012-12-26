@@ -66,11 +66,8 @@ tee = "tee"
 prompt :: String
 prompt = "> "
 
-forkDelay :: Int
-forkDelay = 1000 * 100
-
 sleep :: Int -> IO ()
-sleep t = threadDelay $ 1000 * 1000 * t
+sleep t = threadDelay $ 1000 * t
 
 pollIO :: IO (Maybe a) -> IO a
 pollIO io = do
@@ -155,10 +152,10 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-spawn :: Task -> Config -> IO () -> [Maybe Fd] -> IO (Maybe ProcessID)
-spawn t cfg ready fds =
+spawn :: Task -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
+spawn t cfg fds =
 
-    loop (t, cfg) ready start
+    loop (t, cfg) start
 
     where
         start = do
@@ -179,8 +176,8 @@ waitWant w var = do
     v <- atomically $ takeTMVar var
     unless (v == w) $ waitWant w var
 
-loop :: (Task, Config) -> IO () -> IO (IO ProcessStatus, IO ()) -> IO b
-loop (t, cfg) ready start = forever $ ready >> do
+loop :: (Task, Config) -> IO (IO ProcessStatus, IO ()) -> IO b
+loop (t, cfg) start = forever $ do
     waitWant Up (tWant t)
 
     (waitExit, stop) <- start
@@ -296,14 +293,10 @@ run cfg = do
 
     changeWorkingDirectory (dir cfg)
 
-    concurrently (spawn outTask cfg outReady [Just readfd, Nothing, Nothing])
-                 (spawn inTask  cfg inReady  [Nothing, Just writefd, Just writefd])
+    concurrently (spawn outTask cfg [Just readfd, Nothing, Nothing])
+                 (spawn inTask  cfg [Nothing, Just writefd, Just writefd])
 
     closeMaybeSock maybeSock
-
-    where
-        inReady  = threadDelay forkDelay
-        outReady = return ()
 
 main :: IO ()
 main =
