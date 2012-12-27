@@ -8,7 +8,6 @@ module Main where
 import System.Posix.IO
 import System.Posix (Fd)
 import System.Posix.Process
-import System.Posix.Types (ProcessID)
 import System.Posix.Directory
 import System.Exit
 import System.Environment
@@ -152,54 +151,41 @@ options =
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
 
-spawn :: Task -> Config -> [Maybe Fd] -> IO (Maybe ProcessID)
-spawn t cfg fds =
 
-    loop (t, cfg) start
+waitWant :: Want -> Task -> IO ()
+waitWant w t = do
+    v <- atomically $ takeTMVar (tWant t)
+    unless (v == w) $ waitWant w t
 
-    where
-        start = do
-            pid <- forkProcess $ child (tCmd t) fds
+spawn :: Task -> Config -> [Maybe Fd] -> IO b
+spawn t cfg fds = forever $ do
+    waitWant Up t
 
-            -- Normally, we would close the pipe descriptors (`fds`) here,
-            -- but we need to be able to pass them to subsequent child processes
-            -- as they are restarted on failure, so we leave them open.
+    pid <- forkProcess $ child (tCmd t) fds
 
-            return (status pid, stop pid)
+    -- Normally, we would close the pipe descriptors (`fds`) here,
+    -- but we need to be able to pass them to subsequent child processes
+    -- as they are restarted on failure, so we leave them open.
 
-        status = pollIO . getProcessStatus False True
-        stop   = Sig.signalProcess Sig.sigTERM
-
-
-waitWant :: Want -> TMVar Want -> IO ()
-waitWant w var = do
-    v <- atomically $ takeTMVar var
-    unless (v == w) $ waitWant w var
-
-loop :: (Task, Config) -> IO (IO ProcessStatus, IO ()) -> IO b
-loop (t, cfg) start = forever $ do
-    waitWant Up (tWant t)
-
-    (waitExit, stop) <- start
-
-    e <- race waitExit (waitWant Down (tWant t))
+    e <- race (waitExit pid) (waitDown pid)
 
     case e of
         Left (Exited ExitSuccess) -> exitSuccess
         Left _ -> do
-            n <- atomically $ getTaskRestarts t
+            sleep $ delay cfg
+            atomically $ do
+                n <- getTaskRestarts t
 
-            case maxRe cfg of
-                Nothing        -> restart n
-                Just m | n < m -> restart n
-                _              -> return ()
+                case maxRe cfg of
+                    Just m | n == m -> return ()
+                    _               -> transition Up t >> setTaskRestarts t (n + 1)
 
-        Right _  -> stop
+        Right term -> term
 
     where
-        restart n = do
-            sleep (delay cfg)
-            atomically $ transition Up t >> setTaskRestarts t (n + 1)
+        waitExit   = pollIO . getProcessStatus False True
+        waitDown p = (waitWant Down t) >> return (terminate p)
+        terminate  = Sig.signalProcess Sig.sigTERM
 
 child :: Cmd -> [Maybe Fd] -> IO ()
 child (cmd, args) fds' = do
@@ -241,7 +227,7 @@ handleReq (inTask, outTask) cfg wants line =
         ____     -> return $ err (" unknown command '" ++ line ++ "'")
     where
         ok     = "OK"
-        err m  = "ERR" ++ m
+        err m  = "ERROR" ++ m
         help'  = "status, up, down, id, kill, help, q"
         status = do
             w  <- readMVar wants
