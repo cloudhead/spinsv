@@ -50,6 +50,11 @@ data Task = Task
     , tRestarts :: TMVar Int
     }
 
+data State = State
+    { sWant :: MVar Want
+    , sRaw  :: MVar Bool
+    }
+
 data UserQuit = UserQuit deriving (Show, Typeable)
 instance Exception UserQuit
 
@@ -62,8 +67,8 @@ versionString = "0.0.0"
 tee :: String
 tee = "tee"
 
-prompt :: String
-prompt = "> "
+promptString :: String
+promptString = "> "
 
 sleep :: Int -> IO ()
 sleep t = threadDelay $ 1000 * t
@@ -212,9 +217,9 @@ getCmd = do
         (_, _, msgs) ->
             error $ head msgs
 
-handleReq :: (Task, Task) -> Config -> MVar Want -> String -> IO String
-handleReq t c w [] = handleReq t c w "help"
-handleReq (inTask, outTask) cfg wants line =
+handleReq :: (Task, Task) -> Config -> State -> String -> IO String
+handleReq t c s [] = handleReq t c s "help"
+handleReq (inTask, outTask) cfg state line =
     case line of
         "status" -> status
         "config" -> return $ show cfg
@@ -223,12 +228,14 @@ handleReq (inTask, outTask) cfg wants line =
         "kill"   -> atomically (mapM (transition Down) [inTask, outTask]) >> throwIO UserKill
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
+        "raw"    -> swapMVar (sRaw state) True >> return ok
         "q"      -> throwIO UserQuit
         ____     -> return $ err (" unknown command '" ++ line ++ "'")
     where
         ok     = "OK"
         err m  = "ERROR" ++ m
-        help'  = "status, up, down, id, kill, help, q"
+        help'  = "status, config, up, down, id, kill, raw, help, q"
+        wants  = sWant state
         status = do
             w  <- readMVar wants
             rs <- atomically $ sequence [ readTMVar (tRestarts inTask)
@@ -236,25 +243,34 @@ handleReq (inTask, outTask) cfg wants line =
 
             return $ unwords $ (map toLower . show) w : map show rs
 
-recvTCP :: (Task, Task) -> Config -> Handle -> MVar Want -> IO ()
-recvTCP tasks cfg h w =
-    hPutStr h prompt >> hGetLine h >>= handleReq tasks cfg w >>= hPutStrLn h
+showPrompt :: State -> Handle -> IO ()
+showPrompt state h = do
+    raw <- readMVar (sRaw state)
+    unless raw $ hPutStr h promptString
 
-acceptTCP :: (Task, Task) -> Config -> Net.Socket -> MVar Want -> IO a
-acceptTCP tasks cfg s w = forever $ do
+recvTCP :: (Task, Task) -> Config -> Handle -> State -> IO ()
+recvTCP tasks cfg h s =
+    showPrompt s h >> hGetLine h >>= handleReq tasks cfg s >>= hPutStrLn h
+
+acceptTCP :: (Task, Task) -> Config -> Net.Socket -> IO a
+acceptTCP tasks cfg s = forever $ do
     (handle, _, _) <- Net.accept s
+
+    w <- newMVar (want cfg)
+    raw <- newMVar False
+
     hSetBuffering handle NoBuffering
-    forkIO $ (forever $ recvTCP tasks cfg handle w)
+    forkIO $ (forever $ recvTCP tasks cfg handle State{sWant=w, sRaw=raw})
         `catches`
             [ Handler ((\_ -> hClose handle) :: UserQuit -> IO ())
             , Handler ((\_ -> hClose handle) :: IOException -> IO ()) ]
 
-maybeListenTCP :: (Task, Task) -> Config -> MVar Want -> IO (Maybe Net.Socket)
-maybeListenTCP tasks cfg wants =
+maybeListenTCP :: (Task, Task) -> Config -> IO (Maybe Net.Socket)
+maybeListenTCP tasks cfg =
     case port cfg of
         Just p -> do
             sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
-            forkIO $ acceptTCP tasks cfg sock wants
+            forkIO $ acceptTCP tasks cfg sock
             return (Just sock)
         Nothing ->
             return Nothing
@@ -267,8 +283,6 @@ closeMaybeSock _ =
 
 run :: Config -> IO ()
 run cfg = do
-    wants <- newMVar (want cfg)
-
     Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
     Sig.blockSignals $ Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
 
@@ -277,7 +291,7 @@ run cfg = do
     outTask <- newTask cfg outCmd outArgs Up
     inTask  <- newTask cfg inCmd inArgs (want cfg)
 
-    maybeSock <- maybeListenTCP (inTask, outTask) cfg wants
+    maybeSock <- maybeListenTCP (inTask, outTask) cfg
 
     changeWorkingDirectory (dir cfg)
 
