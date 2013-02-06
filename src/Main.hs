@@ -39,6 +39,7 @@ data Config = Config
     , ident   :: Maybe String
     , maxRe   :: Maybe Int
     , dir     :: String
+    , once    :: Bool
     , want    :: Want
     , help    :: Bool
     , version :: Bool
@@ -113,6 +114,7 @@ defaultConfig = Config
     , delay   = 1000
     , ident   = Nothing
     , maxRe   = Nothing
+    , once    = False
     , dir     = "."
     , want    = Up
     , help    = False
@@ -150,6 +152,8 @@ options =
         (ReqArg (\o cfg -> cfg{dir = o})                      "<dir>")  "directory to run in (.)"
     , Option [] ["down"]
         (NoArg  (\cfg   -> cfg{want = Down}))                           "start with the service down"
+    , Option [] ["once"]
+        (NoArg  (\cfg   -> cfg{once = True}))                           "run the process once, then exit"
     , Option [] ["help"]
         (NoArg  (\cfg   -> cfg{help = True}))                           "print the help and exit"
     , Option [] ["version"]
@@ -175,7 +179,10 @@ spawn t cfg fds = forever $ do
     e <- race (waitExit pid) (waitDown pid)
 
     case e of
-        Left (Exited ExitSuccess) -> exitSuccess
+        Left (Exited ExitSuccess) ->
+            exitSuccess
+        Left (Exited status) | (once cfg) ->
+            exitWith status
         Left _ -> do
             sleep $ delay cfg
             atomically $ do
