@@ -6,6 +6,7 @@ module Main where
 -- TODO handle ^C properly on tcp connection
 --
 import System.Posix.IO
+import System.Posix.Types (ProcessID)
 import System.Posix (Fd)
 import System.Posix.Process
 import System.Posix.Directory
@@ -39,6 +40,7 @@ data Config = Config
     , ident   :: Maybe String
     , maxRe   :: Maybe Int
     , dir     :: String
+    , exitSig :: Maybe Sig.Signal
     , once    :: Bool
     , want    :: Want
     , help    :: Bool
@@ -49,6 +51,7 @@ data Task = Task
     { tCmd      :: Cmd
     , tWant     :: TMVar Want
     , tRestarts :: TMVar Int
+    , tPid      :: TVar  ProcessID
     }
 
 data State = State
@@ -85,11 +88,13 @@ newTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Ta
 newTask cfg cmdf argsf w = do
     wants    <- newTMVarIO w
     restarts <- newTMVarIO 0
+    pid      <- newTVarIO  0
 
     return Task
         { tCmd      = (cmdf cfg, argsf cfg)
         , tWant     = wants
         , tRestarts = restarts
+        , tPid      = pid
         }
 
 transition :: Want -> Task -> STM ()
@@ -116,6 +121,7 @@ defaultConfig = Config
     , maxRe   = Nothing
     , once    = False
     , dir     = "."
+    , exitSig = Nothing
     , want    = Up
     , help    = False
     , version = False
@@ -150,6 +156,8 @@ options =
         (ReqArg (\o cfg -> cfg{maxRe = Just $ read o})         "<num>") "max number of service restarts (optional)"
     , Option [] ["dir"]
         (ReqArg (\o cfg -> cfg{dir = o})                      "<dir>")  "directory to run in (.)"
+    , Option [] ["exit-signal"]
+        (ReqArg (\o cfg -> cfg{exitSig = Just $ read o})    "<signum>") "send a signal to the log process when the service goes down"
     , Option [] ["down"]
         (NoArg  (\cfg   -> cfg{want = Down}))                           "start with the service down"
     , Option [] ["once"]
@@ -159,7 +167,6 @@ options =
     , Option [] ["version"]
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
-
 
 waitWant :: Want -> Task -> IO ()
 waitWant w t = do
@@ -175,6 +182,8 @@ spawn t cfg fds = forever $ do
     -- Normally, we would close the pipe descriptors (`fds`) here,
     -- but we need to be able to pass them to subsequent child processes
     -- as they are restarted on failure, so we leave them open.
+
+    atomically $ writeTVar (tPid t) pid
 
     e <- race (waitExit pid) (waitDown pid)
 
@@ -230,9 +239,17 @@ handleReq (inTask, outTask) cfg state line =
     case line of
         "status" -> status
         "config" -> return $ show cfg
-        "up"     -> atomically (transition Up inTask) >> swapMVar wants Up >> return ok
-        "down"   -> atomically (transition Down inTask) >> swapMVar wants Down >> return ok
-        "kill"   -> atomically (mapM (transition Down) [inTask, outTask]) >> throwIO UserKill
+        "up"     -> atomically (transition Up inTask)
+                    >> swapMVar wants Up
+                    >> return ok
+        "down"   -> atomically (transition Down inTask)
+                    >> swapMVar wants Down
+                    >> signalExit
+                    >> return ok
+        "kill"   -> (atomically $ transition Down inTask)
+                    >> signalExit
+                    >> (atomically $ transition Down outTask)
+                    >> throwIO UserKill
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
         "raw"    -> swapMVar (sRaw state) True >> return ok
@@ -249,6 +266,12 @@ handleReq (inTask, outTask) cfg state line =
                                         , readTMVar (tRestarts outTask) ]
 
             return $ unwords $ (map toLower . show) w : map show rs
+
+        signalExit = case exitSig cfg of
+            Just sig ->
+                Sig.signalProcess sig =<< (atomically . readTVar $ tPid outTask)
+            Nothing ->
+                return ()
 
 showPrompt :: State -> Handle -> IO ()
 showPrompt state h = do
