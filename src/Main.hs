@@ -28,6 +28,7 @@ import qualified Network              as Net
 
 type Cmd = (String, [String])
 
+-- | Want represents the desired service state.
 data Want = Up | Down deriving (Show, Eq)
 
 data Config = Config
@@ -47,11 +48,11 @@ data Config = Config
     , version :: Bool
     } deriving Show
 
-data Task = Task
-    { tCmd      :: Cmd
-    , tWant     :: TMVar Want
-    , tRestarts :: TMVar Int
-    , tPid      :: TVar  ProcessID
+data Task = Task                       -- Wraps a system process
+    { tCmd      :: Cmd                 -- The command to run
+    , tWant     :: TMVar Want          -- Whether this task should be 'up' or 'down' (See `Want` type)
+    , tRestarts :: TMVar Int           -- Number of times this task was restarted
+    , tPid      :: TVar  ProcessID     -- Last pid of the underlying process
     }
 
 data State = State
