@@ -239,17 +239,9 @@ handleReq (inTask, outTask) cfg state line =
     case line of
         "status" -> status
         "config" -> return $ show cfg
-        "up"     -> atomically (transition Up inTask)
-                    >> swapMVar wants Up
-                    >> return ok
-        "down"   -> atomically (transition Down inTask)
-                    >> swapMVar wants Down
-                    >> signalExit
-                    >> return ok
-        "kill"   -> (atomically $ transition Down inTask)
-                    >> signalExit
-                    >> (atomically $ transition Down outTask)
-                    >> throwIO UserKill
+        "up"     -> atomically (transition Up inTask) >> swapMVar wants Up >> return ok
+        "down"   -> atomically (transition Down inTask) >> swapMVar wants Down >> signalExit >> return ok
+        "kill"   -> (atomically $ transition Down inTask) >> signalExit >> (atomically $ transition Down outTask) >> throwIO UserKill
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
         "raw"    -> swapMVar (sRaw state) True >> return ok
