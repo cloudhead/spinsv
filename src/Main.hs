@@ -98,14 +98,6 @@ transition :: Want -> Task -> STM ()
 transition w t =
     putTMVar (tWant t) w
 
-getTaskRestarts :: Task -> STM Int
-getTaskRestarts t =
-    takeTMVar (tRestarts t)
-
-setTaskRestarts :: Task -> Int -> STM ()
-setTaskRestarts t =
-    putTMVar (tRestarts t)
-
 defaultConfig :: Config
 defaultConfig = Config
     { inCmd   = tee
@@ -170,6 +162,16 @@ waitWant w t = do
     v <- atomically $ takeTMVar (tWant t)
     unless (v == w) $ waitWant w t
 
+-- | Spawns a task and restarts it on failure, if needed.
+--
+-- We first fork the current process, passing the child a set
+-- of file descriptors for stdin, stdout and stderr.
+--
+-- Then we wait for either of two things to happen: either the
+-- process exits, or a user asks for the service to go down.
+-- We then act accordingly, either by restarting the process after
+-- the configured delay, or killing the process.
+--
 spawn :: Task -> Config -> [Maybe Fd] -> IO b
 spawn t cfg fds = forever $ do
     waitWant Up t
@@ -198,12 +200,19 @@ spawn t cfg fds = forever $ do
                     Just m | n == m -> return ()
                     _               -> transition Up t >> setTaskRestarts t (n + 1)
 
-        Right term -> term
+        Right term -> term -- terminate² the process
 
     where
-        waitExit   = pollIO . getProcessStatus False True
+        waitExit   = pollIO . getProcessStatus False True -- See [1]
         waitDown p = (waitWant Down t) >> return (terminate p)
-        terminate  = Sig.signalProcess Sig.sigTERM
+        terminate  = Sig.signalProcess Sig.sigTERM -- 2.
+
+        getTaskRestarts t' = takeTMVar (tRestarts t')
+        setTaskRestarts t' = putTMVar (tRestarts t')
+
+        -- 1. We cannot use the blocking version of `getProcessStatus`, as it is a
+        -- foreign call, it cannot be interrupted by the `race` function if
+        -- `waitDown` returns first.
 
 child :: Cmd -> [Maybe Fd] -> IO ()
 child (cmd, args) fds' = do
@@ -305,7 +314,7 @@ run cfg = do
     Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
     Sig.blockSignals $ Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
 
-    (readfd, writefd) <- createPipe
+    (readfd, writefd) <- createPipe -- 1.
 
     outTask <- newTask cfg outCmd outArgs Up
     inTask  <- newTask cfg inCmd inArgs (want cfg)
@@ -314,6 +323,10 @@ run cfg = do
 
     changeWorkingDirectory (dir cfg)
 
+    -- Spawn the service and the logger concurrently, passing the read
+    -- end of the pipe¹ to the logger's stdin, and the write end to the
+    -- service's stdout and stderr, such as the output of one is connected
+    -- to the input of the other.
     concurrently (spawn outTask cfg [Just readfd, Nothing, Nothing])
                  (spawn inTask  cfg [Nothing, Just writefd, Just writefd])
 
