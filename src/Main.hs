@@ -59,11 +59,8 @@ data State = State
     , sRaw  :: MVar Bool
     }
 
-data UserQuit = UserQuit deriving (Show, Typeable)
-instance Exception UserQuit
-
-data UserKill = UserKill deriving (Show, Typeable)
-instance Exception UserKill
+data UserAction = UserKill | UserQuit deriving (Show, Typeable)
+instance Exception UserAction
 
 versionString :: String
 versionString = "0.0.0"
@@ -284,7 +281,7 @@ acceptTCP tasks cfg s = forever $ do
     hSetBuffering handle NoBuffering
     forkIO $ (forever $ recvTCP tasks cfg handle State{sWant=w, sRaw=raw})
         `catches`
-            [ Handler ((\_ -> hClose handle) :: UserQuit -> IO ())
+            [ Handler ((\_ -> hClose handle) :: UserAction -> IO ())
             , Handler ((\_ -> hClose handle) :: IOException -> IO ()) ]
 
 maybeListenTCP :: (Task, Task) -> Config -> IO (Maybe Net.Socket)
