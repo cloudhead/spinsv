@@ -1,5 +1,5 @@
 name:                 spinsv
-version:              0.0.0
+version:              0.1.0
 synopsis:             a service runner inspired by runsv
 license:              GPL
 license-file:         LICENSE

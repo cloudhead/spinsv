@@ -63,7 +63,7 @@ data UserAction = UserKill | UserQuit deriving (Show, Typeable)
 instance Exception UserAction
 
 versionString :: String
-versionString = "0.0.0"
+versionString = "0.1.0"
 
 tee :: String
 tee = "tee"
