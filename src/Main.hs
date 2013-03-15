@@ -210,7 +210,7 @@ spawn t cfg fds = forever $ do
                     Just m | n == m -> return ()
                     _               -> transition Up t >> setTaskRestarts t (n + 1)
 
-        Right term -> term -- terminate² the process
+        Right term -> term >> (void $ getProcessStatus True True pid) -- terminate² the process
 
     where
         waitExit   = pollIO . getProcessStatus False True -- See [1]
