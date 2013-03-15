@@ -10,6 +10,7 @@ import System.Posix.Types (ProcessID)
 import System.Posix (Fd)
 import System.Posix.Process
 import System.Posix.Directory
+import System.Process (createProcess, proc)
 import System.Exit
 import System.Environment
 import System.Console.GetOpt
@@ -34,6 +35,8 @@ data Want = Up | Down deriving (Show, Eq)
 data Config = Config
     { inCmd   :: String
     , outCmd  :: String
+    , killCmd :: Maybe String
+    , killArgs:: [String]
     , inArgs  :: [String]
     , outArgs :: [String]
     , port    :: Maybe Int
@@ -103,8 +106,10 @@ defaultConfig :: Config
 defaultConfig = Config
     { inCmd   = tee
     , outCmd  = tee
+    , killCmd = Nothing
     , inArgs  = []
     , outArgs = []
+    , killArgs= []
     , port    = Nothing
     , delay   = 1000
     , ident   = Nothing
@@ -136,6 +141,10 @@ options =
         (ReqArg (\o cfg -> cfg{inArgs = inArgs cfg ++ [o]})   "<arg>")  "input argument (may be given multiple times)"
     , Option [] ["out.arg"]
         (ReqArg (\o cfg -> cfg{outArgs = outArgs cfg ++ [o]}) "<arg>")  "output argument (may be given multiple times)"
+    , Option [] ["kill.cmd"]
+        (ReqArg (\o cfg -> cfg{killCmd = Just o})              "<cmd>")  "kill command (kill)"
+    , Option [] ["kill.arg"]
+        (ReqArg (\o cfg -> cfg{killArgs = killArgs cfg ++ [o]}) "<arg>") "kill argument (may be given multiple times)"
     , Option [] ["port"]
         (ReqArg (\o cfg -> cfg{port = Just $ read o})         "<port>") "port to bind to (optional)"
     , Option [] ["id"]
@@ -206,7 +215,9 @@ spawn t cfg fds = forever $ do
     where
         waitExit   = pollIO . getProcessStatus False True -- See [1]
         waitDown p = (waitWant Down t) >> return (terminate p)
-        terminate  = Sig.signalProcess Sig.sigTERM -- 2.
+        terminate p = case killCmd cfg of
+            Just cmd -> void $ createProcess (proc cmd (killArgs cfg))
+            Nothing  -> Sig.signalProcess Sig.sigTERM p -- 2.
 
         getTaskRestarts t' = takeTMVar (tRestarts t')
         setTaskRestarts t' = putTMVar (tRestarts t')
