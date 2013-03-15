@@ -10,7 +10,7 @@ import System.Posix.Types (ProcessID)
 import System.Posix (Fd)
 import System.Posix.Process
 import System.Posix.Directory
-import System.Process (createProcess, proc)
+import System.Process (createProcess, waitForProcess, proc, close_fds)
 import System.Exit
 import System.Environment
 import System.Console.GetOpt
@@ -210,17 +210,20 @@ spawn t cfg fds = forever $ do
                     Just m | n == m -> return ()
                     _               -> transition Up t >> setTaskRestarts t (n + 1)
 
-        Right term -> term >> (void $ getProcessStatus True True pid) -- terminate² the process
+        Right term -> term >> reapChild pid -- terminate² the process
 
     where
         waitExit   = pollIO . getProcessStatus False True -- See [1]
         waitDown p = (waitWant Down t) >> return (terminate p)
         terminate p = case killCmd cfg of
-            Just cmd -> void $ createProcess (proc cmd (killArgs cfg))
+            Just cmd -> createProcess (proc cmd (killArgs cfg)){ close_fds = True } >>= reap
             Nothing  -> Sig.signalProcess Sig.sigTERM p -- 2.
+            where
+                reap (_, _, _, ph) = void $ waitForProcess ph
 
         getTaskRestarts t' = takeTMVar (tRestarts t')
         setTaskRestarts t' = putTMVar (tRestarts t')
+        reapChild pid = void $ getProcessStatus True True pid
 
         -- 1. We cannot use the blocking version of `getProcessStatus`, as it is a
         -- foreign call, it cannot be interrupted by the `race` function if
