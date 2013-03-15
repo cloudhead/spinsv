@@ -260,6 +260,7 @@ handleReq (inTask, outTask) cfg state line =
         "up"     -> atomically (transition Up inTask) >> swapMVar wants Up >> return ok
         "down"   -> atomically (transition Down inTask) >> swapMVar wants Down >> signalExit >> return ok
         "kill"   -> (atomically $ transition Down inTask) >> signalExit >> (atomically $ transition Down outTask) >> throwIO UserKill
+        "pid"    -> getProcessID >>= return . show
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
         "raw"    -> swapMVar (sRaw state) True >> return ok
@@ -268,7 +269,7 @@ handleReq (inTask, outTask) cfg state line =
     where
         ok     = "OK"
         err m  = "ERROR" ++ m
-        help'  = "status, config, up, down, id, kill, raw, help, q"
+        help'  = "status, config, up, down, id, kill, pid, raw, help, q"
         wants  = sWant state
         status = do
             w  <- readMVar wants
