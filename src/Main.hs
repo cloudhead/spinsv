@@ -56,6 +56,7 @@ data Task = Task                       -- Wraps a system process
     , tWant     :: TMVar Want          -- Whether this task should be 'up' or 'down' (See `Want` type)
     , tRestarts :: TMVar Int           -- Number of times this task was restarted
     , tPid      :: TVar  ProcessID     -- Last pid of the underlying process
+    , tStatus   :: TMVar (Maybe ProcessStatus)
     }
 
 data State = State
@@ -90,12 +91,14 @@ newTask cfg cmdf argsf w = do
     wants    <- newTMVarIO w
     restarts <- newTMVarIO 0
     pid      <- newTVarIO  0
+    status   <- newEmptyTMVarIO
 
     return Task
         { tCmd      = (cmdf cfg, argsf cfg)
         , tWant     = wants
         , tRestarts = restarts
         , tPid      = pid
+        , tStatus   = status
         }
 
 transition :: Want -> Task -> STM ()
@@ -172,6 +175,9 @@ waitWant w t = do
     v <- atomically $ takeTMVar (tWant t)
     unless (v == w) $ waitWant w t
 
+waitStatus :: Task -> IO (Maybe ProcessStatus)
+waitStatus t = atomically $ takeTMVar (tStatus t)
+
 -- | Spawns a task and restarts it on failure, if needed.
 --
 -- We first fork the current process, passing the child a set
@@ -182,8 +188,8 @@ waitWant w t = do
 -- We then act accordingly, either by restarting the process after
 -- the configured delay, or killing the process.
 --
-spawn :: Task -> Config -> [Maybe Fd] -> IO b
-spawn t cfg fds = forever $ do
+spawn :: Task -> Config -> MVar () -> [Maybe Fd] -> IO b
+spawn t cfg chld fds = forever $ do
     waitWant Up t
 
     pid <- forkProcess $ child (tCmd t) fds
@@ -210,20 +216,28 @@ spawn t cfg fds = forever $ do
                     Just m | n == m -> return ()
                     _               -> transition Up t >> setTaskRestarts t (n + 1)
 
-        Right term -> term >> reapChild pid -- terminate² the process
+        Right term -> term >> reapChild pid >>= updateTaskStatus t -- terminate² the process
 
     where
-        waitExit   = pollIO . getProcessStatus False True -- See [1]
+        waitExit pid = do
+            _ <- takeMVar chld
+            s <- getProcessStatus False True pid
+            case s of
+                Nothing -> putMVar chld () >> yield >> waitExit pid
+                Just x  -> return x
+
         waitDown p = (waitWant Down t) >> return (terminate p)
         terminate p = case killCmd cfg of
-            Just cmd -> createProcess (proc cmd (killArgs cfg)){ close_fds = True } >>= reap
+            Just cmd -> runCmd cmd >>= reapCmd
             Nothing  -> Sig.signalProcess Sig.sigTERM p -- 2.
             where
-                reap (_, _, _, ph) = void $ waitForProcess ph
+                runCmd cmd = createProcess (proc cmd (killArgs cfg)){ close_fds = True }
+                reapCmd (_, _, _, handle) = void $ waitForProcess handle
 
         getTaskRestarts t' = takeTMVar (tRestarts t')
         setTaskRestarts t' = putTMVar (tRestarts t')
-        reapChild pid = void $ getProcessStatus True True pid
+        updateTaskStatus t'= atomically . putTMVar (tStatus t')
+        reapChild pid = getProcessStatus True True pid
 
         -- 1. We cannot use the blocking version of `getProcessStatus`, as it is a
         -- foreign call, it cannot be interrupted by the `race` function if
@@ -261,8 +275,8 @@ handleReq (inTask, outTask) cfg state line =
         "status" -> status
         "config" -> return $ show cfg
         "up"     -> atomically (transition Up inTask) >> swapMVar wants Up >> return ok
-        "down"   -> atomically (transition Down inTask) >> swapMVar wants Down >> signalExit >> return ok
-        "kill"   -> (atomically $ transition Down inTask) >> signalExit >> (atomically $ transition Down outTask) >> throwIO UserKill
+        "down"   -> atomically (transition Down inTask) >> waitStatus inTask >> swapMVar wants Down >> signalExit >> return ok
+        "kill"   -> (atomically $ transition Down inTask) >> waitStatus inTask >> signalExit >> (atomically $ transition Down outTask) >> throwIO UserKill
         "pid"    -> getProcessID >>= return . show
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
@@ -325,10 +339,15 @@ closeMaybeSock (Just sock) =
 closeMaybeSock _ =
     return ()
 
+signals :: Sig.SignalSet
+signals = Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
+
 run :: Config -> IO ()
 run cfg = do
+    chld <- newEmptyMVar
+
     Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
-    Sig.blockSignals $ Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
+    Sig.installHandler Sig.sigCHLD (Sig.Catch $ putMVar chld ()) Nothing
 
     (readfd, writefd) <- createPipe -- 1.
 
@@ -343,8 +362,8 @@ run cfg = do
     -- end of the pipe¹ to the logger's stdin, and the write end to the
     -- service's stdout and stderr, such as the output of one is connected
     -- to the input of the other.
-    concurrently (spawn outTask cfg [Just readfd, Nothing, Nothing])
-                 (spawn inTask  cfg [Nothing, Just writefd, Just writefd])
+    concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing])
+                 (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd])
 
     closeMaybeSock maybeSock
 
