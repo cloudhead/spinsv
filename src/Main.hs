@@ -76,16 +76,6 @@ tee = "tee"
 promptString :: String
 promptString = "> "
 
-sleep :: Int -> IO ()
-sleep t = threadDelay $ 1000 * t
-
-pollIO :: IO (Maybe a) -> IO a
-pollIO io = do
-    a <- io
-    case a of
-        Nothing -> sleep 100 >> pollIO io
-        Just x  -> return x
-
 newTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
 newTask cfg cmdf argsf w = do
     wants    <- newTMVarIO w
@@ -208,7 +198,7 @@ spawn t cfg chld fds = forever $ do
         Left (Exited status) | (once cfg) ->
             exitWith status
         Left _ -> do
-            sleep $ delay cfg
+            threadDelay $ 1000 * (delay cfg)
             atomically $ do
                 n <- getTaskRestarts t
 
