@@ -21,6 +21,7 @@ import Control.Exception hiding (handle)
 import System.IO
 import Data.Char
 import Data.Maybe
+import Data.List (elemIndex)
 import Control.Monad
 import Data.Typeable
 
@@ -57,6 +58,7 @@ data Task = Task                       -- Wraps a system process
     , tRestarts :: TMVar Int           -- Number of times this task was restarted
     , tPid      :: TVar  ProcessID     -- Last pid of the underlying process
     , tStatus   :: TMVar (Maybe ProcessStatus)
+    , tEnv      :: TVar  [(String, String)]
     }
 
 data State = State
@@ -82,6 +84,7 @@ newTask cfg cmdf argsf w = do
     restarts <- newTMVarIO 0
     pid      <- newTVarIO  0
     status   <- newEmptyTMVarIO
+    env      <- newTVarIO []
 
     return Task
         { tCmd      = (cmdf cfg, argsf cfg)
@@ -89,6 +92,7 @@ newTask cfg cmdf argsf w = do
         , tRestarts = restarts
         , tPid      = pid
         , tStatus   = status
+        , tEnv      = env
         }
 
 transition :: Want -> Task -> STM ()
@@ -182,7 +186,8 @@ spawn :: Task -> Config -> MVar () -> [Maybe Fd] -> IO b
 spawn t cfg chld fds = forever $ do
     waitWant Up t
 
-    pid <- forkProcess $ child (tCmd t) fds
+    env <- atomically $ readTVar (tEnv t)
+    pid <- forkProcess $ child (tCmd t) env fds
 
     -- Normally, we would close the pipe descriptors (`fds`) here,
     -- but we need to be able to pass them to subsequent child processes
@@ -233,12 +238,12 @@ spawn t cfg chld fds = forever $ do
         -- foreign call, it cannot be interrupted by the `race` function if
         -- `waitDown` returns first.
 
-child :: Cmd -> [Maybe Fd] -> IO ()
-child (cmd, args) fds' = do
+child :: Cmd -> [(String, String)] -> [Maybe Fd] -> IO ()
+child (cmd, args) env fds' = do
     sequence_ $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
              ++ map closeFd' (catMaybes fds')
 
-    executeFile cmd True args Nothing
+    executeFile cmd True args (Just env)
 
     where
         maybeDup (Just fd) std = void $ dupTo fd std
@@ -271,11 +276,23 @@ handleReq (inTask, outTask) cfg state line =
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
         "raw"    -> swapMVar (sRaw state) True >> return ok
+        "env"    -> atomically (readTVar $ tEnv inTask) >>= return . show
         "q"      -> throwIO UserQuit
-        ____     -> return $ err (" unknown command '" ++ line ++ "'")
+        other    -> case words other of
+            "set" : [x] -> case elemIndex '=' x of
+                Just i -> atomically $ do
+                    vars <- readTVar (tEnv inTask)
+                    writeTVar (tEnv inTask) $ (fst pair, tail $ snd pair) : vars
+                    return ok
+                    where pair = splitAt i x
+                Nothing -> errcmd
+            ["set"] -> return $ err " usage: set KEY=VALUE"
+            ___     -> errcmd
+
     where
         ok     = "OK"
         err m  = "ERROR" ++ m
+        errcmd = return $ err (" unknown command '" ++ line ++ "'")
         help'  = "status, config, up, down, id, kill, pid, raw, help, q"
         wants  = sWant state
         status = do
