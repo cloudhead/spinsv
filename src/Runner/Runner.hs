@@ -55,7 +55,7 @@ data Config = Config
 data Task = Task                       -- Wraps a system process
     { tCmd      :: Cmd                 -- The command to run
     , tWant     :: TMVar Want          -- Whether this task should be 'up' or 'down' (See `Want` type)
-    , tRestarts :: TMVar Int           -- Number of times this task was restarted
+    , tRestarts :: TVar  Int           -- Number of times this task was restarted
     , tPid      :: TVar  ProcessID     -- Last pid of the underlying process
     , tStatus   :: TMVar (Maybe ProcessStatus)
     , tEnv      :: TVar  [(String, String)]
@@ -81,7 +81,7 @@ promptString = "> "
 newTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
 newTask cfg cmdf argsf w = do
     wants    <- newTMVarIO w
-    restarts <- newTMVarIO 0
+    restarts <- newTVarIO  0
     pid      <- newTVarIO  0
     status   <- newEmptyTMVarIO
     env      <- newTVarIO []
@@ -95,9 +95,9 @@ newTask cfg cmdf argsf w = do
         , tEnv      = env
         }
 
-transition :: Want -> Task -> STM ()
+transition :: Want -> Task -> STM Want
 transition w t =
-    putTMVar (tWant t) w
+    swapTMVar (tWant t) w
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -166,7 +166,7 @@ options =
 
 waitWant :: Want -> Task -> IO ()
 waitWant w t = do
-    v <- atomically $ takeTMVar (tWant t)
+    v <- atomically $ readTMVar (tWant t)
     unless (v == w) $ waitWant w t
 
 waitStatus :: Task -> IO (Maybe ProcessStatus)
@@ -202,16 +202,18 @@ spawn t cfg chld fds = forever $ do
             exitSuccess
         Left (Exited status) | (once cfg) ->
             exitWith status
-        Left _ -> do
+        Left ps -> do
             threadDelay $ 1000 * (delay cfg)
             atomically $ do
                 n <- getTaskRestarts t
+                w <- readTMVar (tWant t)
 
                 case maxRe cfg of
-                    Just m | n == m -> return ()
-                    _               -> transition Up t >> setTaskRestarts t (n + 1)
+                    Just m | n == m    -> return () -- TODO
+                    _      | w == Down -> updateTaskStatus t (Just ps)
+                    _                  -> setTaskRestarts t (n + 1)
 
-        Right term -> term >> reapChild pid >>= updateTaskStatus t -- terminate² the process
+        Right term -> term >> reapChild pid >>= (atomically . updateTaskStatus t) -- terminate² the process
 
     where
         waitExit pid = do
@@ -229,9 +231,9 @@ spawn t cfg chld fds = forever $ do
                 runCmd cmd = createProcess (proc cmd (killArgs cfg)){ close_fds = True }
                 reapCmd (_, _, _, handle) = void $ waitForProcess handle
 
-        getTaskRestarts t' = takeTMVar (tRestarts t')
-        setTaskRestarts t' = putTMVar (tRestarts t')
-        updateTaskStatus t'= atomically . putTMVar (tStatus t')
+        getTaskRestarts t' = readTVar  (tRestarts t')
+        setTaskRestarts t' = writeTVar (tRestarts t')
+        updateTaskStatus t'= putTMVar (tStatus t')
         reapChild pid = getProcessStatus True True pid
 
         -- 1. We cannot use the blocking version of `getProcessStatus`, as it is a
@@ -297,8 +299,8 @@ handleReq (inTask, outTask) cfg state line =
         wants  = sWant state
         status = do
             w  <- readMVar wants
-            rs <- atomically $ sequence [ readTMVar (tRestarts inTask)
-                                        , readTMVar (tRestarts outTask) ]
+            rs <- atomically $ sequence [ readTVar (tRestarts inTask)
+                                        , readTVar (tRestarts outTask) ]
 
             return $ unwords $ (map toLower . show) w : map show rs
 
