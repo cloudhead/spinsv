@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 --
@@ -14,6 +15,7 @@ import System.Process (createProcess, waitForProcess, proc, close_fds)
 import System.Exit
 import System.Environment
 import System.Console.GetOpt
+import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent.STM
 import Control.Concurrent
 import Control.Concurrent.Async
@@ -163,6 +165,10 @@ options =
     , Option [] ["version"]
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
     ]
+
+-- | Used to exit the main thread from any child thread
+exit :: MVar ()
+exit = unsafePerformIO newEmptyMVar
 
 waitWant :: Want -> Task -> IO ()
 waitWant w t = do
@@ -329,8 +335,13 @@ acceptTCP tasks cfg s = forever $ do
     hSetBuffering handle NoBuffering
     forkIO $ (forever $ recvTCP tasks cfg handle State{sWant=w, sRaw=raw})
         `catches`
-            [ Handler ((\_ -> hClose handle) :: UserAction -> IO ())
+            [ Handler $ userHandler handle
             , Handler ((\_ -> hClose handle) :: IOException -> IO ()) ]
+    where
+        userHandler :: Handle -> UserAction -> IO ()
+        userHandler h e = hClose h >> case e of
+            UserKill -> putMVar exit ()
+            _        -> return ()
 
 maybeListenTCP :: (Task, Task) -> Config -> IO (Maybe Net.Socket)
 maybeListenTCP tasks cfg =
@@ -371,10 +382,13 @@ run cfg = do
     -- end of the pipe¹ to the logger's stdin, and the write end to the
     -- service's stdout and stderr, such as the output of one is connected
     -- to the input of the other.
-    concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing])
-                 (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd])
+    fork $ concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing])
+                        (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd])
 
-    closeMaybeSock maybeSock
+    takeMVar exit >> closeMaybeSock maybeSock
+
+    where
+        fork io = forkFinally io (\_ -> putMVar exit ())
 
 main :: IO ()
 main =
