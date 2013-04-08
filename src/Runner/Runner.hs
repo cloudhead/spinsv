@@ -200,10 +200,10 @@ spawn t cfg chld fds = forever $ do
     case e of
         Left (Exited ExitSuccess) ->
             exitSuccess
-        Left (Exited status) | (once cfg) ->
+        Left (Exited status) | once cfg ->
             exitWith status
         Left ps -> do
-            threadDelay $ 1000 * (delay cfg)
+            threadDelay $ 1000 * delay cfg
             atomically $ do
                 n <- getTaskRestarts t
                 w <- readTMVar (tWant t)
@@ -223,7 +223,7 @@ spawn t cfg chld fds = forever $ do
                 Nothing -> putMVar chld () >> yield >> waitExit pid
                 Just x  -> return x
 
-        waitDown p = (waitWant Down t) >> return (terminate p)
+        waitDown p = waitWant Down t >> return (terminate p)
         terminate p = case killCmd cfg of
             Just cmd -> runCmd cmd >>= reapCmd
             Nothing  -> Sig.signalProcess Sig.sigTERM p -- 2.
@@ -274,11 +274,11 @@ handleReq (inTask, outTask) cfg state line =
         "up"     -> atomically (transition Up inTask) >> swapMVar wants Up >> return ok
         "down"   -> atomically (transition Down inTask) >> waitStatus inTask >> swapMVar wants Down >> signalExit >> return ok
         "kill"   -> (atomically $ transition Down inTask) >> waitStatus inTask >> signalExit >> (atomically $ transition Down outTask) >> throwIO UserKill
-        "pid"    -> getProcessID >>= return . show
+        "pid"    -> liftM show getProcessID
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
         "raw"    -> swapMVar (sRaw state) True >> return ok
-        "env"    -> atomically (readTVar $ tEnv inTask) >>= return . show
+        "env"    -> liftM show $ atomically (readTVar $ tEnv inTask)
         "q"      -> throwIO UserQuit
         other    -> case words other of
             "set" : [x] -> case elemIndex '=' x of
