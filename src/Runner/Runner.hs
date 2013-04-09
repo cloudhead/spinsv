@@ -97,9 +97,9 @@ newTask cfg cmdf argsf w = do
         , tEnv      = env
         }
 
-go :: Want -> Task -> STM Want
+go :: Want -> Task -> STM ()
 go w t =
-    swapTMVar (tWant t) w
+    putTMVar (tWant t) w
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -212,12 +212,15 @@ spawn t cfg chld fds = forever $ do
             threadDelay $ 1000 * delay cfg
             atomically $ do
                 n <- getTaskRestarts t
-                w <- readTMVar (tWant t)
 
                 case maxRe cfg of
-                    Just m | n == m    -> return () -- TODO
-                    _      | w == Down -> updateTaskStatus t (Just ps)
-                    _                  -> setTaskRestarts t (n + 1)
+                    Just m | n == m -> return () -- TODO
+                    _               -> tryTakeTMVar (tWant t) >>= f n
+
+                    where
+                        f n Nothing     = go Up t >> setTaskRestarts t (n + 1)
+                        f n (Just Up)   = setTaskRestarts t (n + 1)
+                        f _ (Just Down) = updateTaskStatus t (Just ps)
 
         Right term -> term >> reapChild pid >>= (atomically . updateTaskStatus t) -- terminate² the process
 
@@ -278,8 +281,8 @@ handleReq (inTask, outTask) cfg state line =
         "status" -> status
         "config" -> return $ show cfg
         "up"     -> atomically (go Up inTask) >> swapMVar wants Up >> return ok
-        "down"   -> atomically (go Down inTask) >> waitStatus inTask >> swapMVar wants Down >> signalExit >> return ok
-        "kill"   -> (atomically $ go Down inTask) >> waitStatus inTask >> signalExit >> (atomically $ go Down outTask) >> throwIO UserKill
+        "down"   -> down inTask >> swapMVar wants Down >> signalExit >> return ok
+        "kill"   -> down inTask >> signalExit >> (atomically $ go Down outTask) >> throwIO UserKill
         "pid"    -> liftM show getProcessID
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
@@ -303,6 +306,7 @@ handleReq (inTask, outTask) cfg state line =
         errcmd = return $ err (" unknown command '" ++ line ++ "'")
         help'  = "status, config, up, down, id, kill, pid, raw, help, q"
         wants  = sWant state
+        down t = atomically (go Down t) >> waitStatus t
         status = do
             w  <- readMVar wants
             rs <- atomically $ sequence [ readTVar (tRestarts inTask)
