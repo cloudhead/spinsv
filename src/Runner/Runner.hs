@@ -97,8 +97,8 @@ newTask cfg cmdf argsf w = do
         , tEnv      = env
         }
 
-transition :: Want -> Task -> STM Want
-transition w t =
+go :: Want -> Task -> STM Want
+go w t =
     swapTMVar (tWant t) w
 
 defaultConfig :: Config
@@ -277,9 +277,9 @@ handleReq (inTask, outTask) cfg state line =
     case line of
         "status" -> status
         "config" -> return $ show cfg
-        "up"     -> atomically (transition Up inTask) >> swapMVar wants Up >> return ok
-        "down"   -> atomically (transition Down inTask) >> waitStatus inTask >> swapMVar wants Down >> signalExit >> return ok
-        "kill"   -> (atomically $ transition Down inTask) >> waitStatus inTask >> signalExit >> (atomically $ transition Down outTask) >> throwIO UserKill
+        "up"     -> atomically (go Up inTask) >> swapMVar wants Up >> return ok
+        "down"   -> atomically (go Down inTask) >> waitStatus inTask >> swapMVar wants Down >> signalExit >> return ok
+        "kill"   -> (atomically $ go Down inTask) >> waitStatus inTask >> signalExit >> (atomically $ go Down outTask) >> throwIO UserKill
         "pid"    -> liftM show getProcessID
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
