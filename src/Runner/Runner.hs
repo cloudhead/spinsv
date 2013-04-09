@@ -167,8 +167,11 @@ options =
     ]
 
 -- | Used to exit the main thread from any child thread
-exit :: MVar ()
-exit = unsafePerformIO newEmptyMVar
+exitVar :: MVar ExitCode
+exitVar = unsafePerformIO newEmptyMVar
+
+exit :: ExitCode -> IO ()
+exit r = putMVar exitVar r
 
 waitWant :: Want -> Task -> IO ()
 waitWant w t = do
@@ -208,9 +211,9 @@ spawn t cfg chld fds = forever $ do
 
     case e of
         Left (Exited ExitSuccess) ->
-            exitSuccess
+            exit ExitSuccess
         Left (Exited status) | once cfg ->
-            exitWith status
+            exit status
         Left ps -> do
             threadDelay $ milliseconds * delay cfg
             -- At this point, it is possible that a value was put into (tWant t)
@@ -219,7 +222,7 @@ spawn t cfg chld fds = forever $ do
                 n <- getTaskRestarts t
 
                 case maxRe cfg of
-                    Just m | n == m -> return () -- TODO
+                    Just m | n == m -> return ()
                     _               -> tryTakeTMVar (tWant t) >>= f n
 
                     where
@@ -349,7 +352,7 @@ acceptTCP tasks cfg s = forever $ do
     where
         userHandler :: Handle -> UserAction -> IO ()
         userHandler h e = hClose h >> case e of
-            UserKill -> putMVar exit ()
+            UserKill -> exit ExitSuccess
             _        -> return ()
 
 maybeListenTCP :: (Task, Task) -> Config -> IO (Maybe Net.Socket)
@@ -394,10 +397,12 @@ run cfg = do
     fork $ concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing])
                         (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd])
 
-    takeMVar exit >> closeMaybeSock maybeSock
+    code <- takeMVar exitVar
+    closeMaybeSock maybeSock
+    exitWith code
 
     where
-        fork io = forkFinally io (\_ -> putMVar exit ())
+        fork io = forkFinally io (\_ -> exit ExitSuccess)
 
 main :: IO ()
 main =
