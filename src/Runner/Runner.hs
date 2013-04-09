@@ -360,8 +360,8 @@ maybeListenTCP tasks cfg =
     case port cfg of
         Just p -> do
             sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
-            forkIO $ acceptTCP tasks cfg sock
-            return (Just sock)
+            forkIO (acceptTCP tasks cfg sock `catch` (\(_ :: IOException) -> return ()))
+            return $ Just sock
         Nothing ->
             return Nothing
 
