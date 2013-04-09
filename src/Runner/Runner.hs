@@ -172,11 +172,14 @@ exit = unsafePerformIO newEmptyMVar
 
 waitWant :: Want -> Task -> IO ()
 waitWant w t = do
-    v <- atomically $ readTMVar (tWant t)
+    v <- atomically $ takeTMVar (tWant t)
     unless (v == w) $ waitWant w t
 
 waitStatus :: Task -> IO (Maybe ProcessStatus)
 waitStatus t = atomically $ takeTMVar (tStatus t)
+
+milliseconds :: Int
+milliseconds = 1000
 
 -- | Spawns a task and restarts it on failure, if needed.
 --
@@ -209,7 +212,9 @@ spawn t cfg chld fds = forever $ do
         Left (Exited status) | once cfg ->
             exitWith status
         Left ps -> do
-            threadDelay $ 1000 * delay cfg
+            threadDelay $ milliseconds * delay cfg
+            -- At this point, it is possible that a value was put into (tWant t)
+            -- from the console thread.
             atomically $ do
                 n <- getTaskRestarts t
 
