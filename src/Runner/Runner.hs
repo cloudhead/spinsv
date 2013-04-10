@@ -80,9 +80,9 @@ tee = "tee"
 promptString :: String
 promptString = "> "
 
-newTask :: Config -> (Config -> String) -> (Config -> [String]) -> Want -> IO Task
-newTask cfg cmdf argsf w = do
-    wants    <- newTMVarIO w
+newTask :: Config -> (Config -> String) -> (Config -> [String]) -> IO Task
+newTask cfg cmdf argsf = do
+    wants    <- newEmptyTMVarIO
     restarts <- newTVarIO  0
     pid      <- newTVarIO  0
     status   <- newEmptyTMVarIO
@@ -194,9 +194,10 @@ milliseconds = 1000
 -- We then act accordingly, either by restarting the process after
 -- the configured delay, or killing the process.
 --
-spawn :: Task -> Config -> MVar () -> [Maybe Fd] -> IO b
-spawn t cfg chld fds = forever $ do
-    waitWant Up t
+spawn :: Task -> Config -> MVar () -> [Maybe Fd] -> Want -> IO ()
+spawn t cfg chld fds Down =
+    waitWant Up t >> spawn t cfg chld fds Up
+spawn t cfg chld fds Up = do
 
     env <- atomically $ readTVar (tEnv t)
     pid <- forkProcess $ child (tCmd t) env fds
@@ -218,21 +219,19 @@ spawn t cfg chld fds = forever $ do
             threadDelay $ milliseconds * delay cfg
             -- At this point, it is possible that a value was put into (tWant t)
             -- from the console thread.
-            atomically $ do
+            (atomically $ do
                 n <- getTaskRestarts t
 
                 case maxRe cfg of
-                    Just m | n == m -> return ()
-                    _               -> tryTakeTMVar (tWant t) >>= f n
+                    Just m | n == m -> return Down
+                    _               -> setTaskRestarts t (n + 1) >> return Up) >>= loop
 
-                    where
-                        f n Nothing     = go Up t >> setTaskRestarts t (n + 1)
-                        f n (Just Up)   = setTaskRestarts t (n + 1)
-                        f _ (Just Down) = updateTaskStatus t (Just ps)
 
-        Right term -> term >> reapChild pid >>= (atomically . updateTaskStatus t) -- terminate² the process
+        Right terminate' -> -- terminate² the process
+            terminate' >> reapChild pid >>= (atomically . updateTaskStatus t) >> loop Down
 
     where
+        loop = spawn t cfg chld fds
         waitExit pid = do
             _ <- takeMVar chld
             s <- getProcessStatus False True pid
@@ -383,8 +382,8 @@ run cfg = do
 
     (readfd, writefd) <- createPipe -- 1.
 
-    outTask <- newTask cfg outCmd outArgs Up
-    inTask  <- newTask cfg inCmd inArgs (want cfg)
+    outTask <- newTask cfg outCmd outArgs
+    inTask  <- newTask cfg inCmd inArgs
 
     maybeSock <- maybeListenTCP (inTask, outTask) cfg
 
@@ -394,8 +393,8 @@ run cfg = do
     -- end of the pipe¹ to the logger's stdin, and the write end to the
     -- service's stdout and stderr, such as the output of one is connected
     -- to the input of the other.
-    fork $ concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing])
-                        (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd])
+    fork $ concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing] Up)
+                        (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd] (want cfg))
 
     code <- takeMVar exitVar
     closeMaybeSock maybeSock
