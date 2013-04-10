@@ -217,8 +217,6 @@ spawn t cfg chld fds Up = do
             exit status
         Left ps -> do
             threadDelay $ milliseconds * delay cfg
-            -- At this point, it is possible that a value was put into (tWant t)
-            -- from the console thread.
             (atomically $ do
                 n <- getTaskRestarts t
 
@@ -250,7 +248,7 @@ spawn t cfg chld fds Up = do
         getTaskRestarts t' = readTVar  (tRestarts t')
         setTaskRestarts t' = writeTVar (tRestarts t')
         updateTaskStatus t'= putTMVar (tStatus t')
-        reapChild pid = getProcessStatus True True pid
+        reapChild pid = takeMVar chld >> getProcessStatus True True pid
 
         -- 1. We cannot use the blocking version of `getProcessStatus`, as it is a
         -- foreign call, it cannot be interrupted by the `race` function if
