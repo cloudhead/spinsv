@@ -44,7 +44,9 @@
 
 . running
 
-  See 'spinsv --help'
+  $ spind --port 80
+
+  For spinsv, see 'spinsv --help'
 
 . example
 
@@ -59,12 +61,12 @@
   Spawn a service via spind's HTTP interface. spinsv will open
   a TCP control socket on port 9898.
 
-    $ curl -X POST 10.0.1.32 -d \
+    $ curl -X POST 10.0.1.32/jobs -d \
         '{"service": {"cmd": "redis-server", "args": []},
           "logger":  {"cmd": "svlogd", "args": ["/var/run/redis/log"]},
           "port":    9898}'
 
-  The service runs under spinsv, a control socket is open
+  The service runs under spinsv, we can verify that it is running:
 
     $ netcat 10.0.1.32 9898
     > status
