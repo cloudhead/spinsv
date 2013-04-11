@@ -46,6 +46,35 @@
 
   See 'spinsv --help'
 
+. example
+
+  Start the spind daemon on a remote host
+
+    $ ssh 10.0.1.32
+    $ spinsv --in.cmd  spind      \
+             --in.arg '--port=80' \
+             --out.cmd svlogd     \
+             --out.arg /var/run/spind
+
+  Spawn a service via spind's HTTP interface. spinsv will open
+  a TCP control socket on port 9898.
+
+    $ curl -X POST 10.0.1.32 -d \
+        '{"service": {"cmd": "redis-server", "args": []},
+          "logger":  {"cmd": "svlogd", "args": ["/var/run/redis/log"]},
+          "port":    9898}'
+
+  The service runs under spinsv, a control socket is open
+
+    $ netcat 10.0.1.32 9898
+    > status
+    up 0 0
+    > q
+
+    $ redis-cli -h 10.0.1.32 info
+    redis_version:2.6.11
+    ...
+
 . copyright
 
   (C) 2012 Alexis Sellier <alexis@cloudhead.io>
