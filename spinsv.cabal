@@ -1,4 +1,4 @@
-name:                 spinsv
+name:                 spind
 version:              0.1.0
 synopsis:             a service runner inspired by runsv
 license:              GPL
@@ -16,7 +16,7 @@ extra-source-files:   README
 
 source-repository head
   type:               git
-  location:           git://github.com/cloudhead/spinsv.git
+  location:           git://github.com/cloudhead/spind.git
 
 executable spinsv
   main-is:            Runner.hs
@@ -30,3 +30,25 @@ executable spinsv
                     , stm
                     , async
                     , network
+
+executable spind
+  main-is:            Daemon.hs
+  hs-source-dirs:     src/Daemon
+  default-language:   Haskell2010
+  ghc-options:       -Wall -fno-warn-unused-do-bind
+  build-depends:      base
+                    , monad-control
+                    , blaze-builder
+                    , aeson
+                    , unix
+                    , bytestring
+                    , process
+                    , transformers
+                    , stm
+                    , containers
+                    , http-types
+                    , text
+                    , network
+                    , conduit
+                    , warp
+                    , wai

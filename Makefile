@@ -6,7 +6,7 @@ build:
 
 static:
 	ghc \
-	  --make src/Main.hs \
+	  --make src/Runner/Runner.hs \
 	  -static \
 	  -optl-static \
 	  -optl-pthread \
