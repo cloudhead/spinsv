@@ -97,10 +97,6 @@ newTask cfg cmdf argsf = do
         , tEnv      = env
         }
 
-go :: Want -> Task -> STM ()
-go w t =
-    putTMVar (tWant t) w
-
 defaultConfig :: Config
 defaultConfig = Config
     { inCmd   = tee
@@ -171,7 +167,7 @@ exitVar :: MVar ExitCode
 exitVar = unsafePerformIO newEmptyMVar
 
 exit :: ExitCode -> IO ()
-exit r = putMVar exitVar r
+exit = putMVar exitVar
 
 waitWant :: Want -> Task -> IO ()
 waitWant w t = do
@@ -215,27 +211,25 @@ spawn t cfg chld fds Up = do
             exit ExitSuccess
         Left (Exited status) | once cfg ->
             exit status
-        Left ps -> do
+        Left _ -> do
             threadDelay $ milliseconds * delay cfg
-            (atomically $ do
+            atomically (do
                 n <- getTaskRestarts t
 
                 case maxRe cfg of
                     Just m | n == m -> return Down
-                    _               -> setTaskRestarts t (n + 1) >> return Up) >>= loop
-
+                    _               -> setTaskRestarts t (n + 1) >> return Up) >>= continue
 
         Right terminate' -> -- terminate² the process
-            terminate' >> reapChild pid >>= (atomically . updateTaskStatus t) >> loop Down
+            terminate' >> reapChild pid >>= (atomically . updateTaskStatus t) >> continue Down
 
     where
-        loop = spawn t cfg chld fds
-        waitExit pid = do
-            _ <- takeMVar chld
-            s <- getProcessStatus False True pid
-            case s of
-                Nothing -> putMVar chld () >> yield >> waitExit pid
-                Just x  -> return x
+        continue = spawn t cfg chld fds
+        waitExit pid =
+            takeMVar chld >> getProcessStatus False True pid >>= \s ->
+                case s of
+                    Nothing -> putMVar chld () >> yield >> waitExit pid
+                    Just x  -> return x
 
         waitDown p = waitWant Down t >> return (terminate p)
         terminate p = case killCmd cfg of
@@ -249,10 +243,6 @@ spawn t cfg chld fds Up = do
         setTaskRestarts t' = writeTVar (tRestarts t')
         updateTaskStatus t'= putTMVar (tStatus t')
         reapChild pid = takeMVar chld >> getProcessStatus True True pid
-
-        -- 1. We cannot use the blocking version of `getProcessStatus`, as it is a
-        -- foreign call, it cannot be interrupted by the `race` function if
-        -- `waitDown` returns first.
 
 child :: Cmd -> [(String, String)] -> [Maybe Fd] -> IO ()
 child (cmd, args) env fds' = do
@@ -285,9 +275,9 @@ handleReq (inTask, outTask) cfg state line =
     case line of
         "status" -> status
         "config" -> return $ show cfg
-        "up"     -> atomically (go Up inTask) >> swapMVar wants Up >> return ok
+        "up"     -> atomically (inTask ~> Up) >> swapMVar wants Up >> return ok
         "down"   -> down inTask >> swapMVar wants Down >> signalExit >> return ok
-        "kill"   -> down inTask >> signalExit >> (atomically $ go Down outTask) >> throwIO UserKill
+        "kill"   -> down inTask >> signalExit >> atomically (outTask ~> Down) >> throwIO UserKill
         "pid"    -> liftM show getProcessID
         "id"     -> return $ fromMaybe "n/a" (ident cfg)
         "help"   -> return help'
@@ -311,7 +301,7 @@ handleReq (inTask, outTask) cfg state line =
         errcmd = return $ err (" unknown command '" ++ line ++ "'")
         help'  = "status, config, up, down, id, kill, pid, raw, help, q"
         wants  = sWant state
-        down t = atomically (go Down t) >> waitStatus t
+        down t = atomically (t ~> Down) >> waitStatus t
         status = do
             w  <- readMVar wants
             rs <- atomically $ sequence [ readTVar (tRestarts inTask)
@@ -324,6 +314,9 @@ handleReq (inTask, outTask) cfg state line =
                 Sig.signalProcess sig =<< (atomically . readTVar $ tPid outTask)
             Nothing ->
                 return ()
+        (~>) t =
+            putTMVar (tWant t)
+
 
 showPrompt :: State -> Handle -> IO ()
 showPrompt state h = do
