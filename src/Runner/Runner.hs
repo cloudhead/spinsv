@@ -365,6 +365,7 @@ run cfg = do
 
     Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
     Sig.installHandler Sig.sigCHLD (Sig.Catch $ putMVar chld ()) Nothing
+    Sig.installHandler Sig.sigTERM (Sig.Catch $ exit $ ExitFailure 2) Nothing
 
     (readfd, writefd) <- createPipe -- 1.
 
