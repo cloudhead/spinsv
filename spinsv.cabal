@@ -37,6 +37,7 @@ executable spind
   default-language:   Haskell2010
   ghc-options:       -Wall -fno-warn-unused-do-bind
   build-depends:      base
+                    , async
                     , monad-control
                     , blaze-builder
                     , aeson
