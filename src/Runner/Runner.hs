@@ -6,6 +6,7 @@ module Main where
 -- TODO use `IO Either` as return type when it makes sense
 -- TODO handle ^C properly on tcp connection
 --
+import Prelude hiding (mapM)
 import System.Posix.IO
 import System.Posix.Types (ProcessID)
 import System.Posix (Fd)
@@ -20,11 +21,12 @@ import Control.Concurrent.STM
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception hiding (handle)
+import Control.Monad hiding (forM, mapM)
 import System.IO
 import Data.Char
 import Data.Maybe
 import Data.List (elemIndex)
-import Control.Monad
+import Data.Traversable (mapM, forM)
 import Data.Typeable
 
 import qualified System.Posix.Signals as Sig
@@ -43,7 +45,7 @@ data Config = Config
     , inArgs  :: [String]
     , outArgs :: [String]
     , port    :: Maybe Int
-    , delay   :: Int
+    , delay   :: Maybe Int
     , ident   :: Maybe String
     , maxRe   :: Maybe Int
     , dir     :: String
@@ -106,7 +108,7 @@ defaultConfig = Config
     , outArgs = []
     , killArgs= []
     , port    = Nothing
-    , delay   = 1000
+    , delay   = Nothing
     , ident   = Nothing
     , maxRe   = Nothing
     , once    = False
@@ -145,7 +147,7 @@ options =
     , Option [] ["id"]
         (ReqArg (\o cfg -> cfg{ident = Just o})                 "<id>") "bind to an identifier (optional)"
     , Option [] ["restart-delay"]
-        (ReqArg (\o cfg -> cfg{delay = read o})                 "<ms>") "restart delay in milliseconds (1000)"
+        (ReqArg (\o cfg -> cfg{delay = Just $ read o})          "<ms>") "restart delay in milliseconds (optional)"
     , Option [] ["max-restarts"]
         (ReqArg (\o cfg -> cfg{maxRe = Just $ read o})         "<num>") "max number of service restarts (optional)"
     , Option [] ["dir"]
@@ -212,7 +214,8 @@ spawn t cfg chld fds Up = do
         Left (Exited status) | once cfg ->
             exit status
         Left _ -> do
-            threadDelay $ milliseconds * delay cfg
+            mapM delayRestart (delay cfg)
+
             atomically (do
                 n <- getTaskRestarts t
 
@@ -225,6 +228,7 @@ spawn t cfg chld fds Up = do
 
     where
         continue = spawn t cfg chld fds
+        delayRestart d = threadDelay $ milliseconds * d
         waitExit pid =
             takeMVar chld >> getProcessStatus False True pid >>= \s ->
                 case s of
@@ -254,7 +258,7 @@ child (cmd, args) env fds' = do
     where
         maybeDup (Just fd) std = void $ dupTo fd std
         maybeDup Nothing   _   = return ()
-        closeFd' fd            = catch (closeFd fd) ((\_ -> return ()) :: IOException -> IO ())
+        closeFd' fd            = catch (closeFd fd) (\(_ :: IOException) -> return ())
 
 getCmd :: IO (Config, String)
 getCmd = do
@@ -309,11 +313,8 @@ handleReq (inTask, outTask) cfg state line =
 
             return $ unwords $ (map toLower . show) w : map show rs
 
-        signalExit = case exitSig cfg of
-            Just sig ->
-                Sig.signalProcess sig =<< (atomically . readTVar $ tPid outTask)
-            Nothing ->
-                return ()
+        signalExit = forM (exitSig cfg) $ \sig ->
+            Sig.signalProcess sig =<< (atomically . readTVar $ tPid outTask)
         (~>) t =
             putTMVar (tWant t)
 
@@ -345,21 +346,11 @@ acceptTCP tasks cfg s = forever $ do
             UserKill -> exit ExitSuccess
             _        -> return ()
 
-maybeListenTCP :: (Task, Task) -> Config -> IO (Maybe Net.Socket)
-maybeListenTCP tasks cfg =
-    case port cfg of
-        Just p -> do
-            sock <- Net.listenOn $ Net.PortNumber $ fromIntegral p
-            forkIO (acceptTCP tasks cfg sock `catch` (\(_ :: IOException) -> return ()))
-            return $ Just sock
-        Nothing ->
-            return Nothing
-
-closeMaybeSock :: Maybe Net.Socket -> IO ()
-closeMaybeSock (Just sock) =
-    Net.sClose sock
-closeMaybeSock _ =
-    return ()
+listenTCP :: (Task, Task) -> Config -> Int -> IO Net.Socket
+listenTCP tasks cfg port' = do
+    sock <- Net.listenOn $ Net.PortNumber $ fromIntegral port'
+    forkIO (acceptTCP tasks cfg sock `catch` (\(_ :: IOException) -> return ()))
+    return sock
 
 signals :: Sig.SignalSet
 signals = Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
@@ -376,7 +367,7 @@ run cfg = do
     outTask <- newTask cfg outCmd outArgs
     inTask  <- newTask cfg inCmd inArgs
 
-    maybeSock <- maybeListenTCP (inTask, outTask) cfg
+    maybeSock <- forM (port cfg) $ listenTCP (inTask, outTask) cfg
 
     changeWorkingDirectory (dir cfg)
 
@@ -387,8 +378,8 @@ run cfg = do
     fork $ concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing] Up)
                         (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd] (want cfg))
 
-    code <- takeMVar exitVar
-    closeMaybeSock maybeSock
+    code <- takeMVar exitVar -- blocks until a thread calls `exit`
+    mapM Net.sClose maybeSock
     exitWith code
 
     where
