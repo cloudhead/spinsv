@@ -51,6 +51,7 @@ data Config = Config
     , dir     :: String
     , exitSig :: Maybe Sig.Signal
     , once    :: Bool
+    , rawMode :: Bool
     , want    :: Want
     , help    :: Bool
     , version :: Bool
@@ -112,6 +113,7 @@ defaultConfig = Config
     , ident   = Nothing
     , maxRe   = Nothing
     , once    = False
+    , rawMode = False
     , dir     = "."
     , exitSig = Nothing
     , want    = Up
@@ -158,6 +160,8 @@ options =
         (NoArg  (\cfg   -> cfg{want = Down}))                           "start with the service down"
     , Option [] ["once"]
         (NoArg  (\cfg   -> cfg{once = True}))                           "run the process once, then exit"
+    , Option [] ["raw"]
+        (NoArg  (\cfg   -> cfg{rawMode = True}))                        "don't show prompt in console (on)"
     , Option [] ["help"]
         (NoArg  (\cfg   -> cfg{help = True}))                           "print the help and exit"
     , Option [] ["version"]
@@ -333,7 +337,7 @@ acceptTCP tasks cfg s = forever $ do
     (handle, _, _) <- Net.accept s
 
     w <- newMVar (want cfg)
-    raw <- newMVar False
+    raw <- newMVar (rawMode cfg)
 
     hSetBuffering handle NoBuffering
     forkIO $ (forever $ recvTCP tasks cfg handle State{sWant=w, sRaw=raw})
