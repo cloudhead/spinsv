@@ -11,23 +11,23 @@ import System.Posix.IO
 import System.Posix.Types (ProcessID)
 import System.Posix (Fd)
 import System.Posix.Process
-import System.Posix.Directory
+import System.Posix.Directory (changeWorkingDirectory)
 import System.Process (createProcess, waitForProcess, proc, close_fds)
 import System.Exit
-import System.Environment
+import System.Environment (getArgs, getProgName)
 import System.Console.GetOpt
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent.STM
 import Control.Concurrent
-import Control.Concurrent.Async
+import Control.Concurrent.Async (race, concurrently)
 import Control.Exception hiding (handle)
 import Control.Monad hiding (forM, mapM)
 import System.IO
-import Data.Char
-import Data.Maybe
+import Data.Char (toLower)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.List (elemIndex)
 import Data.Traversable (mapM, forM)
-import Data.Typeable
+import Data.Typeable (Typeable)
 
 import qualified System.Posix.Signals as Sig
 import qualified Network              as Net
