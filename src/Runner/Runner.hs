@@ -12,6 +12,7 @@ import System.Posix.Types (ProcessID)
 import System.Posix (Fd)
 import System.Posix.Process
 import System.Posix.Directory (changeWorkingDirectory)
+import System.Posix.Files (fileAccess, fileExist)
 import System.Process (createProcess, waitForProcess, proc, close_fds)
 import System.Exit
 import System.Environment (getArgs, getProgName)
@@ -372,6 +373,8 @@ run cfg = do
     outTask <- newTask cfg outCmd outArgs
     inTask  <- newTask cfg inCmd inArgs
 
+    mapM checkFile [(inCmd cfg), (outCmd cfg)]
+
     maybeSock <- forM (port cfg) $ listenTCP (inTask, outTask) cfg
 
     changeWorkingDirectory (dir cfg)
@@ -389,6 +392,12 @@ run cfg = do
 
     where
         fork io = forkFinally io (\_ -> exit ExitSuccess)
+        checkFile f = do
+            fileExist  f >>= e
+            fileAccess f False False True >>= e -- check for execute permission
+
+            where
+                e ok = unless ok $ error $ "cannot access file '" ++ f ++ "'"
 
 main :: IO ()
 main =
