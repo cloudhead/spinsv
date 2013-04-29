@@ -1,4 +1,4 @@
-name:                 spind
+name:                 spinsv
 version:              0.1.0
 synopsis:             a service runner inspired by runsv
 license:              GPL
@@ -16,7 +16,7 @@ extra-source-files:   README
 
 source-repository head
   type:               git
-  location:           git://github.com/cloudhead/spind.git
+  location:           git://github.com/cloudhead/spinsv.git
 
 executable spinsv
   main-is:            Main.hs
