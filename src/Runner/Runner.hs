@@ -1,7 +1,8 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RecordWildCards #-}
 
-module Main where
+module Runner where
 --
 -- TODO use `IO Either` as return type when it makes sense
 -- TODO handle ^C properly on tcp connection
@@ -10,13 +11,9 @@ import Prelude hiding (mapM)
 import System.Posix.IO
 import System.Posix.Types (ProcessID)
 import System.Posix (Fd)
-import System.Posix.Process
+import System.Posix.Process (ProcessStatus(..), getProcessID)
 import System.Posix.Directory (changeWorkingDirectory)
-import System.Posix.Files (fileAccess, fileExist)
-import System.Process (createProcess, waitForProcess, proc, close_fds)
 import System.Exit
-import System.Environment (getArgs, getProgName)
-import System.Console.GetOpt
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent.STM
 import Control.Concurrent
@@ -25,15 +22,24 @@ import Control.Exception hiding (handle)
 import Control.Monad hiding (forM, mapM)
 import System.IO
 import Data.Char (toLower)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (fromMaybe)
 import Data.List (elemIndex)
 import Data.Traversable (mapM, forM)
 import Data.Typeable (Typeable)
 
+import qualified System.Process       as Proc
 import qualified System.Posix.Signals as Sig
 import qualified Network              as Net
 
 type Cmd = (String, [String])
+
+data System = System
+    { spawnProcess     :: Cmd -> [(String, String)] -> [Maybe Fd] -> IO ProcessID
+    , killProcess      :: ProcessID -> IO ()
+    , getProcessStatus :: Bool -> Bool -> ProcessID -> IO (Maybe ProcessStatus)
+    , childExited      :: MVar ()
+    , exit             :: ExitCode -> IO ()
+    }
 
 -- | Want represents the desired service state.
 data Want = Up | Down deriving (Show, Eq)
@@ -122,59 +128,9 @@ defaultConfig = Config
     , version = False
     }
 
-helpString :: String -> String
-helpString prog =
-    usageInfo header options
-    where
-        header = unlines [ concat [ "usage: ", prog, " [<option>...]"]
-                         ,"\nstart and monitor a service and its appendant log service\n"
-                         , "options:"
-                         ]
-
-options :: [OptDescr (Config -> Config)]
-options =
-    [ Option [] ["in.cmd"]
-        (ReqArg (\o cfg -> cfg{inCmd = o})                    "<cmd>")  "input command (tee)"
-    , Option [] ["out.cmd"]
-        (ReqArg (\o cfg -> cfg{outCmd = o})                   "<cmd>")  "output command (tee)"
-    , Option [] ["in.arg"]
-        (ReqArg (\o cfg -> cfg{inArgs = inArgs cfg ++ [o]})   "<arg>")  "input argument (may be given multiple times)"
-    , Option [] ["out.arg"]
-        (ReqArg (\o cfg -> cfg{outArgs = outArgs cfg ++ [o]}) "<arg>")  "output argument (may be given multiple times)"
-    , Option [] ["kill.cmd"]
-        (ReqArg (\o cfg -> cfg{killCmd = Just o})              "<cmd>")  "kill command (kill)"
-    , Option [] ["kill.arg"]
-        (ReqArg (\o cfg -> cfg{killArgs = killArgs cfg ++ [o]}) "<arg>") "kill argument (may be given multiple times)"
-    , Option [] ["port"]
-        (ReqArg (\o cfg -> cfg{port = Just $ read o})         "<port>") "port to bind to (optional)"
-    , Option [] ["id"]
-        (ReqArg (\o cfg -> cfg{ident = Just o})                 "<id>") "bind to an identifier (optional)"
-    , Option [] ["restart-delay"]
-        (ReqArg (\o cfg -> cfg{delay = Just $ read o})          "<ms>") "restart delay in milliseconds (optional)"
-    , Option [] ["max-restarts"]
-        (ReqArg (\o cfg -> cfg{maxRe = Just $ read o})         "<num>") "max number of service restarts (optional)"
-    , Option [] ["dir"]
-        (ReqArg (\o cfg -> cfg{dir = o})                      "<dir>")  "directory to run in (.)"
-    , Option [] ["exit-signal"]
-        (ReqArg (\o cfg -> cfg{exitSig = Just $ read o})    "<signum>") "send a signal to the log process when the service goes down"
-    , Option [] ["down"]
-        (NoArg  (\cfg   -> cfg{want = Down}))                           "start with the service down"
-    , Option [] ["once"]
-        (NoArg  (\cfg   -> cfg{once = True}))                           "run the process once, then exit"
-    , Option [] ["raw"]
-        (NoArg  (\cfg   -> cfg{rawMode = True}))                        "don't show prompt in console (on)"
-    , Option [] ["help"]
-        (NoArg  (\cfg   -> cfg{help = True}))                           "print the help and exit"
-    , Option [] ["version"]
-        (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
-    ]
-
--- | Used to exit the main thread from any child thread
-exitVar :: MVar ExitCode
-exitVar = unsafePerformIO newEmptyMVar
-
-exit :: ExitCode -> IO ()
-exit = putMVar exitVar
+-- | Used to signal threads that a SIGCHLD was received
+chldVar :: MVar ()
+chldVar = unsafePerformIO newEmptyMVar
 
 waitWant :: Want -> Task -> IO ()
 waitWant w t = do
@@ -197,13 +153,13 @@ milliseconds = 1000
 -- We then act accordingly, either by restarting the process after
 -- the configured delay, or killing the process.
 --
-spawn :: Task -> Config -> MVar () -> [Maybe Fd] -> Want -> IO ()
-spawn t cfg chld fds Down =
-    waitWant Up t >> spawn t cfg chld fds Up
-spawn t cfg chld fds Up = do
+spawn :: Task -> Config -> System -> [Maybe Fd] -> Want -> IO ()
+spawn t cfg sys fds Down =
+    waitWant Up t >> spawn t cfg sys fds Up
+spawn t cfg sys@System{..} fds Up = do
 
     env <- atomically $ readTVar (tEnv t)
-    pid <- forkProcess $ child (tCmd t) env fds
+    pid <- spawnProcess (tCmd t) env fds
 
     -- Normally, we would close the pipe descriptors (`fds`) here,
     -- but we need to be able to pass them to subsequent child processes
@@ -232,51 +188,26 @@ spawn t cfg chld fds Up = do
             terminate' >> reapChild pid >>= (atomically . updateTaskStatus t) >> continue Down
 
     where
-        continue = spawn t cfg chld fds
+        continue = spawn t cfg sys fds
         delayRestart d = threadDelay $ milliseconds * d
         waitExit pid =
-            takeMVar chld >> getProcessStatus False True pid >>= \s ->
+            takeMVar childExited >> getProcessStatus False True pid >>= \s ->
                 case s of
-                    Nothing -> putMVar chld () >> yield >> waitExit pid
+                    Nothing -> putMVar childExited () >> yield >> waitExit pid
                     Just x  -> return x
 
         waitDown p = waitWant Down t >> return (terminate p)
         terminate p = case killCmd cfg of
             Just cmd -> runCmd cmd >>= reapCmd
-            Nothing  -> Sig.signalProcess Sig.sigTERM p -- 2.
+            Nothing  -> killProcess p -- 2.
             where
-                runCmd cmd = createProcess (proc cmd (killArgs cfg)){ close_fds = True }
-                reapCmd (_, _, _, handle) = void $ waitForProcess handle
+                runCmd cmd = Proc.createProcess (Proc.proc cmd (killArgs cfg)){ Proc.close_fds = True }
+                reapCmd (_, _, _, handle) = void $ Proc.waitForProcess handle
 
         getTaskRestarts t' = readTVar  (tRestarts t')
         setTaskRestarts t' = writeTVar (tRestarts t')
         updateTaskStatus t'= putTMVar (tStatus t')
-        reapChild pid = takeMVar chld >> getProcessStatus True True pid
-
-child :: Cmd -> [(String, String)] -> [Maybe Fd] -> IO ()
-child (cmd, args) env fds' = do
-    sequence_ $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
-             ++ map closeFd' (catMaybes fds')
-
-    executeFile cmd True args (Just env)
-
-    where
-        maybeDup (Just fd) std = void $ dupTo fd std
-        maybeDup Nothing   _   = return ()
-        closeFd' fd            = catch (closeFd fd) (\(_ :: IOException) -> return ())
-
-getCmd :: IO (Config, String)
-getCmd = do
-    a <- getArgs
-    n <- getProgName
-
-    case getOpt RequireOrder options a of
-        (flags, [], []) ->
-            return (foldl (\def t -> t def) defaultConfig flags, n)
-        (_, nonOpts, []) ->
-            error $ "unrecognized arguments: " ++ unwords nonOpts
-        (_, _, msgs) ->
-            error $ head msgs
+        reapChild pid = takeMVar childExited >> getProcessStatus True True pid
 
 handleReq :: (Task, Task) -> Config -> State -> String -> IO String
 handleReq t c s [] = handleReq t c s "help"
@@ -323,7 +254,6 @@ handleReq (inTask, outTask) cfg state line =
         (~>) t =
             putTMVar (tWant t)
 
-
 showPrompt :: State -> Handle -> IO ()
 showPrompt state h = do
     raw <- readMVar (sRaw state)
@@ -333,8 +263,8 @@ recvTCP :: (Task, Task) -> Config -> Handle -> State -> IO ()
 recvTCP tasks cfg h s =
     showPrompt s h >> hGetLine h >>= handleReq tasks cfg s >>= hPutStrLn h
 
-acceptTCP :: (Task, Task) -> Config -> Net.Socket -> IO a
-acceptTCP tasks cfg s = forever $ do
+acceptTCP :: (Task, Task) -> Config -> System -> Net.Socket -> IO a
+acceptTCP tasks cfg System{..} s = forever $ do
     (handle, _, _) <- Net.accept s
 
     w <- newMVar (want cfg)
@@ -351,21 +281,19 @@ acceptTCP tasks cfg s = forever $ do
             UserKill -> exit ExitSuccess
             _        -> return ()
 
-listenTCP :: (Task, Task) -> Config -> Int -> IO Net.Socket
-listenTCP tasks cfg port' = do
+listenTCP :: (Task, Task) -> Config -> System -> Int -> IO Net.Socket
+listenTCP tasks cfg sys port' = do
     sock <- Net.listenOn $ Net.PortNumber $ fromIntegral port'
-    forkIO (acceptTCP tasks cfg sock `catch` (\(_ :: IOException) -> return ()))
+    forkIO (acceptTCP tasks cfg sys sock `catch` (\(_ :: IOException) -> return ()))
     return sock
 
 signals :: Sig.SignalSet
 signals = Sig.addSignal Sig.sigCHLD Sig.emptySignalSet
 
-run :: Config -> IO ()
-run cfg = do
-    chld <- newEmptyMVar
-
+run :: Config -> System -> IO (Maybe Net.Socket)
+run cfg sys@System{..} = do
     Sig.installHandler Sig.sigPIPE Sig.Ignore Nothing
-    Sig.installHandler Sig.sigCHLD (Sig.Catch $ putMVar chld ()) Nothing
+    Sig.installHandler Sig.sigCHLD (Sig.Catch $ putMVar childExited ()) Nothing
     Sig.installHandler Sig.sigTERM (Sig.Catch $ exit $ ExitFailure 2) Nothing
 
     (readfd, writefd) <- createPipe -- 1.
@@ -373,9 +301,7 @@ run cfg = do
     outTask <- newTask cfg outCmd outArgs
     inTask  <- newTask cfg inCmd inArgs
 
-    mapM checkFile [(inCmd cfg), (outCmd cfg)]
-
-    maybeSock <- forM (port cfg) $ listenTCP (inTask, outTask) cfg
+    maybeSock <- forM (port cfg) $ listenTCP (inTask, outTask) cfg sys
 
     changeWorkingDirectory (dir cfg)
 
@@ -383,28 +309,11 @@ run cfg = do
     -- end of the pipe¹ to the logger's stdin, and the write end to the
     -- service's stdout and stderr, such as the output of one is connected
     -- to the input of the other.
-    fork $ concurrently (spawn outTask cfg chld [Just readfd, Nothing, Nothing] Up)
-                        (spawn inTask  cfg chld [Nothing, Just writefd, Just writefd] (want cfg))
+    fork $ concurrently (spawn outTask cfg sys [Just readfd, Nothing, Nothing] Up)
+                        (spawn inTask  cfg sys [Nothing, Just writefd, Just writefd] (want cfg))
 
-    code <- takeMVar exitVar -- blocks until a thread calls `exit`
-    mapM Net.sClose maybeSock
-    exitWith code
+    return maybeSock
 
     where
         fork io = forkFinally io (\_ -> exit ExitSuccess)
-        checkFile f = do
-            fileExist  f >>= e
-            fileAccess f False False True >>= e -- check for execute permission
-
-            where
-                e ok = unless ok $ error $ "cannot access file '" ++ f ++ "'"
-
-main :: IO ()
-main =
-    getCmd >>= execute
-
-    where
-        execute (cfg, n) | version cfg = putStrLn (unwords [n, "version", versionString]) >> exitSuccess
-        execute (cfg, n) | help    cfg = putStrLn (helpString n) >> exitSuccess
-        execute (cfg, _)               = run cfg
 
