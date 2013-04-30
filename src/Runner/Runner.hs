@@ -51,7 +51,7 @@ data Config = Config
     , killArgs:: [String]
     , inArgs  :: [String]
     , outArgs :: [String]
-    , port    :: Maybe Int
+    , port    :: Maybe Net.PortID
     , delay   :: Maybe Int
     , ident   :: Maybe String
     , maxRe   :: Maybe Int
@@ -281,9 +281,9 @@ acceptTCP tasks cfg System{..} s = forever $ do
             UserKill -> exit ExitSuccess
             _        -> return ()
 
-listenTCP :: (Task, Task) -> Config -> System -> Int -> IO Net.Socket
+listenTCP :: (Task, Task) -> Config -> System -> Net.PortID -> IO Net.Socket
 listenTCP tasks cfg sys port' = do
-    sock <- Net.listenOn $ Net.PortNumber $ fromIntegral port'
+    sock <- Net.listenOn port'
     forkIO (acceptTCP tasks cfg sys sock `catch` (\(_ :: IOException) -> return ()))
     return sock
 

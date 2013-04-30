@@ -3,7 +3,7 @@
 module Main where
 
 import Prelude hiding (mapM)
-import Network (sClose)
+import Network (sClose, PortID(..))
 import System.Environment (getArgs, getProgName)
 import System.Console.GetOpt
 import System.Exit
@@ -35,7 +35,7 @@ options =
     , Option [] ["kill.arg"]
         (ReqArg (\o cfg -> cfg{killArgs = killArgs cfg ++ [o]}) "<arg>") "kill argument (may be given multiple times)"
     , Option [] ["port"]
-        (ReqArg (\o cfg -> cfg{port = Just $ read o})         "<port>") "port to bind to (optional)"
+        (ReqArg (\o cfg -> cfg{port = Just $ readPort o})     "<port>") "port to bind to (optional)"
     , Option [] ["id"]
         (ReqArg (\o cfg -> cfg{ident = Just o})                 "<id>") "bind to an identifier (optional)"
     , Option [] ["restart-delay"]
@@ -56,7 +56,9 @@ options =
         (NoArg  (\cfg   -> cfg{help = True}))                           "print the help and exit"
     , Option [] ["version"]
         (NoArg  (\cfg   -> cfg{version = True}))                        "print the version and exit"
-    ]
+    ] where
+        readPort = PortNumber . fromInt . read
+        fromInt = fromIntegral :: (Num b) => Int -> b
 
 helpString :: String -> String
 helpString prog =
