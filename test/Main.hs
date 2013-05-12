@@ -10,6 +10,16 @@ import           Control.Monad hiding (mapM)
 import           Network
 import           Runner
 import           Helper
+import qualified Data.Map as Map
+
+testDownFlag :: PortNumber -> IO ()
+testDownFlag p = withRunner config{want = Down} p $ \env -> do
+    runner <- connect (PortNumber p)
+    (want, _, _) <- getRunnerStatus runner
+    assertEqual "status should be 'down'" Down want
+
+    procs <- getProcesses env
+    assertEqual "there should be no only one process running" 1 (Map.size procs)
 
 testProcessStartAndRestartOnFail :: PortNumber -> IO ()
 testProcessStartAndRestartOnFail p = withRunner config p $ \env -> do
@@ -98,4 +108,5 @@ main =
     defaultMain [ testCase "Console 'status' command" (testConsoleStatus 9999)
                 , testCase "Console 'up' and 'down' commands" (testConsoleUpDown 9998)
                 , testCase "Process start and restart on fail" (testProcessStartAndRestartOnFail 9997)
+                , testCase "'--down' flag" (testDownFlag 9999)
                 ]

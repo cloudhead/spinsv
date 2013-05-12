@@ -39,6 +39,10 @@ config =
 nextPid :: TVar ProcessID
 nextPid = unsafePerformIO $ newTVarIO (CPid 1)
 
+getProcesses :: Env -> IO (Map ProcessID Process)
+getProcesses Env{..} =
+    readTVarIO processes
+
 getProcess :: Env -> ProcessID -> IO Process
 getProcess Env{..} pid = do
     procs <- readTVarIO processes
@@ -126,7 +130,6 @@ spawnProcess' env cmd vars _fds = do
         writeTVar nextPid (CPid $ succ (fromIntegral n))
         return n
 
-    putStrLn (show pid)
     wait <- newEmptyTMVarIO
 
     let
