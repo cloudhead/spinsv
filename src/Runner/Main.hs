@@ -4,7 +4,7 @@ module Main where
 
 import Prelude hiding (mapM)
 import Network (sClose, PortID(..))
-import System.Environment (getArgs, getProgName)
+import System.Environment (getArgs, getProgName, getEnvironment)
 import System.Console.GetOpt
 import System.Exit
 import System.Posix.Signals (signalProcess, sigTERM)
@@ -87,7 +87,9 @@ child (cmd, args) env fds' = do
     sequence_ $ zipWith maybeDup fds' [stdInput, stdOutput, stdError]
              ++ map closeFd' (catMaybes fds')
 
-    executeFile cmd True args (Just env)
+    env' <- getEnvironment
+
+    executeFile cmd True args (Just $ env' ++ env)
 
     where
         maybeDup (Just fd) std = void $ dupTo fd std
