@@ -81,5 +81,5 @@ test-suite all
                      , test-framework
                      , test-framework-hunit
                      , stm
-                     , spind
+                     , spinsv
                      , HUnit
