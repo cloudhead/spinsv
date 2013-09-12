@@ -7,7 +7,7 @@ import Network (sClose, PortID(..))
 import System.Environment (getArgs, getProgName, getEnvironment)
 import System.Console.GetOpt
 import System.Exit
-import System.Posix.Signals (signalProcess, sigTERM)
+import System.Posix.Signals (signalProcess, sigTERM, sigKILL)
 import System.Posix.Process (forkProcess, executeFile)
 import System.Posix (Fd)
 import System.Posix.IO
@@ -34,6 +34,8 @@ options =
         (ReqArg (\o cfg -> cfg{killCmd = Just o})              "<cmd>")  "kill command (kill)"
     , Option [] ["kill.arg"]
         (ReqArg (\o cfg -> cfg{killArgs = killArgs cfg ++ [o]}) "<arg>") "kill argument (may be given multiple times)"
+    , Option [] ["kill.grace-period-seconds"]
+        (ReqArg (\o cfg -> cfg{killGracePeriodSeconds = read o}) "<arg>") "grace period following SIGTERM after which SIGKILL will be sent to the process."
     , Option [] ["port"]
         (ReqArg (\o cfg -> cfg{port = Just $ readPort o})     "<port>") "port to bind to (optional)"
     , Option [] ["id"]
@@ -101,7 +103,8 @@ runner cfg = do
     exitVar <- newEmptyMVar
     maybeSock <- run cfg System
         { spawnProcess     = \c a f -> forkProcess $ child c a f -- cmd args fds
-        , killProcess      = signalProcess sigTERM
+        , termProcess      = signalProcess sigTERM
+        , killProcess      = signalProcess sigKILL
         , getProcessStatus = System.Posix.Process.getProcessStatus
         , childExited      = chldVar
         , exit             = putMVar exitVar
