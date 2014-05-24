@@ -35,6 +35,7 @@ type Cmd = (String, [String])
 
 data System = System
     { spawnProcess     :: Cmd -> [(String, String)] -> [Maybe Fd] -> IO ProcessID
+    , termProcess      :: ProcessID -> IO ()
     , killProcess      :: ProcessID -> IO ()
     , getProcessStatus :: Bool -> Bool -> ProcessID -> IO (Maybe ProcessStatus)
     , childExited      :: MVar ()
@@ -45,23 +46,24 @@ data System = System
 data Want = Up | Down deriving (Show, Eq)
 
 data Config = Config
-    { inCmd   :: String
-    , outCmd  :: String
-    , killCmd :: Maybe String
-    , killArgs:: [String]
-    , inArgs  :: [String]
-    , outArgs :: [String]
-    , port    :: Maybe Net.PortID
-    , delay   :: Maybe Int
-    , ident   :: Maybe String
-    , maxRe   :: Maybe Int
-    , dir     :: String
-    , exitSig :: Maybe Sig.Signal
-    , once    :: Bool
-    , rawMode :: Bool
-    , want    :: Want
-    , help    :: Bool
-    , version :: Bool
+    { inCmd                  :: String
+    , outCmd                 :: String
+    , killCmd                :: Maybe String
+    , killArgs               :: [String]
+    , killGracePeriodSeconds :: Int
+    , inArgs                 :: [String]
+    , outArgs                :: [String]
+    , port                   :: Maybe Net.PortID
+    , delay                  :: Maybe Int
+    , ident                  :: Maybe String
+    , maxRe                  :: Maybe Int
+    , dir                    :: String
+    , exitSig                :: Maybe Sig.Signal
+    , once                   :: Bool
+    , rawMode                :: Bool
+    , want                   :: Want
+    , help                   :: Bool
+    , version                :: Bool
     } deriving Show
 
 data Task = Task                       -- Wraps a system process
@@ -109,23 +111,24 @@ newTask cfg cmdf argsf = do
 
 defaultConfig :: Config
 defaultConfig = Config
-    { inCmd   = tee
-    , outCmd  = tee
-    , killCmd = Nothing
-    , inArgs  = []
-    , outArgs = []
-    , killArgs= []
-    , port    = Nothing
-    , delay   = Nothing
-    , ident   = Nothing
-    , maxRe   = Nothing
-    , once    = False
-    , rawMode = False
-    , dir     = "."
-    , exitSig = Nothing
-    , want    = Up
-    , help    = False
-    , version = False
+    { inCmd                  = tee
+    , outCmd                 = tee
+    , killCmd                = Nothing
+    , killGracePeriodSeconds = 7
+    , inArgs                 = []
+    , outArgs                = []
+    , killArgs               = []
+    , port                   = Nothing
+    , delay                  = Nothing
+    , ident                  = Nothing
+    , maxRe                  = Nothing
+    , once                   = False
+    , rawMode                = False
+    , dir                    = "."
+    , exitSig                = Nothing
+    , want                   = Up
+    , help                   = False
+    , version                = False
     }
 
 -- | Used to signal threads that a SIGCHLD was received
@@ -197,9 +200,15 @@ spawn t cfg sys@System{..} fds Up = do
                     Just x  -> return x
 
         waitDown p = waitWant Down t >> return (terminate p)
-        terminate p = case killCmd cfg of
-            Just cmd -> runCmd cmd >>= reapCmd
-            Nothing  -> killProcess p -- 2.
+
+        terminate p =
+            do
+              case killCmd cfg of
+                Just cmd -> runCmd cmd >>= reapCmd
+                Nothing -> return ()
+              termProcess p
+              threadDelay $ 1000000 * killGracePeriodSeconds cfg
+              killProcess p
             where
                 runCmd cmd = Proc.createProcess (Proc.proc cmd (killArgs cfg)){ Proc.close_fds = True }
                 reapCmd (_, _, _, handle) = void $ Proc.waitForProcess handle
