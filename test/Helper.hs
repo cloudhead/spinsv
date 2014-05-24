@@ -121,7 +121,7 @@ withRunner cfg p io = do
 
         env = Env { processes = procs, processSpawned = procSpawned }
 
-    bracket (run cfg { port = Just (fromIntegral p) } system) (mapM sClose) (\_ -> io env)
+    bracket (run cfg { port = Just (PortNumber $ fromIntegral p) } system) (mapM sClose) (\_ -> io env)
 
 spawnProcess' :: Env -> Cmd -> [(String, String)] -> [Maybe Fd] -> IO ProcessID
 spawnProcess' env cmd vars _fds = do
