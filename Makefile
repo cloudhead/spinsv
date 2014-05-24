@@ -8,8 +8,9 @@ test:
 	$(CABAL) test
 
 static:
+	mkdir -p bin
 	ghc \
-	  --make src/Runner/Runner.hs \
+	  --make src/Runner/Runner.hs src/Runner/Main.hs \
 	  -static \
 	  -optl-static \
 	  -optl-pthread \
